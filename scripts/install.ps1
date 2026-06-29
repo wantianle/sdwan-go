@@ -199,8 +199,36 @@ try {
 # ────────────────────────────────────────────────────────────
 # 3. Server selection
 # ────────────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "[3/5] Server selection (checking latency...)" -ForegroundColor Cyan
+$configPath = "$INSTALL_DIR\iwan.conf"
+$useExistingConfig = $false
+
+if (Test-Path $configPath) {
+    Write-Host ""
+    Write-Host "[3/5] Existing config detected: $configPath" -ForegroundColor Cyan
+    while ($true) {
+        $configChoice = Read-Host "  Choose: [v] view existing / [u] use existing / [o] overwrite"
+        switch ($configChoice.ToLower()) {
+            "v" {
+                Write-Host ""
+                Write-Host "  Existing iwan.conf:" -ForegroundColor Cyan
+                Get-Content -Path $configPath | ForEach-Object { Write-Host "    $_" }
+                Write-Host ""
+            }
+            "u" {
+                $useExistingConfig = $true
+                break
+            }
+            "o" {
+                break
+            }
+            default {
+                Write-Host "  Enter v, u, or o" -ForegroundColor Yellow
+            }
+        }
+        if ($useExistingConfig) { break }
+    }
+}
+
 $servers = @(
     @{Name="minieye.9966.org"; Desc="Telecom dedicated 1000M (recommended)"},
     @{Name="dwan.minieye.tech"; Desc="Telecom broadband 3x100M"},
@@ -263,50 +291,58 @@ function Get-ServerLatencyMs {
     return -1
 }
 
-for ($i=0; $i -lt $servers.Count; $i++) {
-    $s = $servers[$i]
-    $lat = "timeout/unreachable"
-    $latColor = "DarkGray"
-    try {
-        $ms = Get-ServerLatencyMs -Server $s.Name
-        if ($ms -gt 0) {
-            $lat = "${ms}ms"
-            if ($ms -lt 20) {
-                $latColor = "Green"
-            } elseif ($ms -le 80) {
-                $latColor = "Yellow"
-            } else {
-                $latColor = "Red"
-            }
-        }
-    } catch {
-        $latColor = "DarkGray"
-    }
-    $mark = if ($i -eq 0) { " [default]" } else { "" }
-    Write-Host "  [$($i+1)] $($s.Name) - $($s.Desc)  " -NoNewline
-    Write-Host $lat -ForegroundColor $latColor -NoNewline
-    Write-Host $mark
-}
+if (-not $useExistingConfig) {
+    Write-Host ""
+    Write-Host "[3/5] Server selection (checking latency...)" -ForegroundColor Cyan
 
-$choice = Read-Host "`nSelect server (Enter = 1)"
-$idx = 0
-if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le 5) {
-    $idx = [int]$choice - 1
+    for ($i=0; $i -lt $servers.Count; $i++) {
+        $s = $servers[$i]
+        $lat = "timeout/unreachable"
+        $latColor = "DarkGray"
+        try {
+            $ms = Get-ServerLatencyMs -Server $s.Name
+            if ($ms -gt 0) {
+                $lat = "${ms}ms"
+                if ($ms -lt 20) {
+                    $latColor = "Green"
+                } elseif ($ms -le 80) {
+                    $latColor = "Yellow"
+                } else {
+                    $latColor = "Red"
+                }
+            }
+        } catch {
+            $latColor = "DarkGray"
+        }
+        $mark = if ($i -eq 0) { " [default]" } else { "" }
+        Write-Host "  [$($i+1)] $($s.Name) - $($s.Desc)  " -NoNewline
+        Write-Host $lat -ForegroundColor $latColor -NoNewline
+        Write-Host $mark
+    }
+
+    $choice = Read-Host "`nSelect server (Enter = 1)"
+    $idx = 0
+    if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le 5) {
+        $idx = [int]$choice - 1
+    }
+    $selectedServer = $servers[$idx].Name
+    Write-Host "  Selected: $selectedServer" -ForegroundColor Green
 }
-$selectedServer = $servers[$idx].Name
-Write-Host "  Selected: $selectedServer" -ForegroundColor Green
 
 # ────────────────────────────────────────────────────────────
 # 4. Credentials & config
 # ────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "[4/5] Account config" -ForegroundColor Cyan
-$username = Read-Host "  Username"
-$password = Read-Host "  Password" -AsSecureString
-$passwordPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($password))
+if ($useExistingConfig) {
+    Write-Host "  Using existing config: $configPath" -ForegroundColor Green
+} else {
+    $username = Read-Host "  Username"
+    $password = Read-Host "  Password" -AsSecureString
+    $passwordPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($password))
 
-$configContent = @"
+    $configContent = @"
 server=$selectedServer
 username=$username
 password=$passwordPlain
@@ -317,18 +353,9 @@ tunname=iwan1
 routenet=192.168.0.0/16
 "@
 
-$configPath = "$INSTALL_DIR\iwan.conf"
-if (Test-Path $configPath) {
-    $overwrite = Read-Host "  Config exists, overwrite? (y/n)"
-    if ($overwrite -ne "y") {
-        Write-Host "  Keep existing config" -ForegroundColor Green
-    } else {
-        Set-Content -Path $configPath -Value $configContent
-    }
-} else {
     Set-Content -Path $configPath -Value $configContent
+    Write-Host "  Config saved: $configPath" -ForegroundColor Green
 }
-Write-Host "  Config saved: $configPath" -ForegroundColor Green
 
 # ────────────────────────────────────────────────────────────
 # 5. Auto-start & launch
