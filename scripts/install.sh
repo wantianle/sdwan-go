@@ -127,33 +127,34 @@ download_binary() {
 
     echo -e "${B}📥 下载 $binary ...${NC}"
 
-    # Try each proxy mirror for raw dist and release URLs silently
+    # Build ordered URL list: each proxy x (raw, release), then direct x (raw, release)
+    local -a urls=()
     for mirror in "${GH_PROXIES[@]}"; do
-        for base in "$raw_url" "$release_url"; do
-            if curl -fsSL "${mirror}${base}" -o "$dest" 2>/dev/null; then
-                echo -e "${G}✅ 下载完成 (via ${mirror%%/*}, $(du -h "$dest" | cut -f1))${NC}"
-                return 0
-            fi
-        done
+        urls+=("${mirror}${raw_url} (${mirror%%/*} raw)" )
+        urls+=("${mirror}${release_url} (${mirror%%/*} Release)" )
     done
+    urls+=("$raw_url (direct raw)")
+    urls+=("$release_url (direct Release)")
 
-    # Try direct raw dist (silent)
-    if curl -fsSL "$raw_url" -o "$dest" 2>/dev/null; then
-        echo -e "${G}✅ 下载完成 (direct, $(du -h "$dest" | cut -f1))${NC}"
-        return 0
-    fi
-
-    # Last resort: direct Release with progress bar
-    echo "  尝试直连 GitHub Release ..."
-    if curl -fL --progress-bar "$release_url" -o "$dest"; then
-        echo -e "${G}✅ 下载完成 (direct Release, $(du -h "$dest" | cut -f1))${NC}"
-        return 0
-    fi
+    local total=${#urls[@]}
+    local i=0
+    for entry in "${urls[@]}"; do
+        ((i++))
+        local url="${entry% (*}"
+        local label="${entry##*(}"
+        label="${label%)}"
+        printf "  [%d/%d] %-35s ... " "$i" "$total" "$label"
+        if curl -fsSL --connect-timeout 5 --max-time 30 "$url" -o "$dest" 2>/dev/null; then
+            echo -e "${G}✅ $(du -h "$dest" | cut -f1)${NC}"
+            chmod +x "$dest"
+            return 0
+        else
+            echo -e "${Y}超时${NC}"
+        fi
+    done
 
     echo -e "${R}❌ 所有下载方式均失败，请检查网络${NC}"
     exit 1
-
-    chmod +x "$dest"
 }
 
 # ────────────────────────────────────────────────────────────
