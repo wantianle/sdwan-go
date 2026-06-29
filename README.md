@@ -81,12 +81,12 @@ routenet=192.168.0.0/16    # 内网路由网段（可选，默认 192.168.0.0/16
 
 **Linux / macOS：**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wantianle/sdwan-go/main/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.sh | sudo bash
 ```
 
 **Windows（管理员 PowerShell）：**
 ```powershell
-iwr -useb https://raw.githubusercontent.com/wantianle/sdwan-go/main/scripts/install.ps1 | iex
+iwr -useb https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.ps1 | iex
 ```
 
 脚本会自动：识别 OS 和架构 → ping 测速选服务器 → 输入工号密码 → 下载二进制 → 配置 systemd/LaunchDaemon/开机自启 → 启动服务。

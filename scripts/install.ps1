@@ -5,7 +5,7 @@
 # setup deployment directory, optional auto-start.
 #
 # One-liner (admin PowerShell):
-#   iwr -useb https://raw.githubusercontent.com/wantianle/sdwan-go/main/scripts/install.ps1 | iex
+#   iwr -useb https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.ps1 | iex
 # ────────────────────────────────────────────────────────────
 
 $ErrorActionPreference = "Stop"

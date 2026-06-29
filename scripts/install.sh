@@ -11,7 +11,7 @@ set -euo pipefail
 
 REPO_OWNER="wantianle"
 REPO_NAME="sdwan-go"
-REPO_BRANCH="main"              # or a tag like "v1.0.0"
+REPO_BRANCH="master"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/sdwan"
 CONFIG_FILE="$CONFIG_DIR/iwan.conf"
