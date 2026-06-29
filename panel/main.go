@@ -25,6 +25,16 @@ const (
 	panelMargin = 16
 )
 
+func clamp(value, minValue, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
 func main() {
 	// Crash recovery — log panics instead of silently exiting
 	defer func() {
@@ -53,15 +63,35 @@ func main() {
 				panelJustShown.Store(true)
 				app.OnPanelShown() // resume probes + immediate refresh
 				wailsRuntime.WindowShow(appCtx)
-				if workArea, ok := primaryWorkArea(); ok {
-					x := int(workArea.Right) - panelWidth - panelMargin
-					y := int(workArea.Bottom) - panelHeight - panelMargin
-					wailsRuntime.WindowSetPosition(appCtx, x, y)
-				} else if screens, err := wailsRuntime.ScreenGetAll(appCtx); err == nil {
+				windowWidth, windowHeight := wailsRuntime.WindowGetSize(appCtx)
+				if windowWidth <= 0 {
+					windowWidth = panelWidth
+				}
+				if windowHeight <= 0 {
+					windowHeight = panelHeight
+				}
+
+				if screens, err := wailsRuntime.ScreenGetAll(appCtx); err == nil {
 					for _, s := range screens {
 						if s.IsPrimary {
-							x := s.Size.Width - panelWidth - panelMargin
-							y := s.Size.Height - panelHeight - panelMargin
+							logicalLeft := 0
+							logicalTop := 0
+							logicalRight := s.Size.Width
+							logicalBottom := s.Size.Height
+
+							if workArea, ok := primaryWorkArea(); ok && workArea.MonitorWidth > 0 && workArea.MonitorHeight > 0 {
+								scaleX := float64(s.Size.Width) / float64(workArea.MonitorWidth)
+								scaleY := float64(s.Size.Height) / float64(workArea.MonitorHeight)
+								logicalLeft = int(float64(workArea.WorkLeft-workArea.MonitorLeft) * scaleX)
+								logicalTop = int(float64(workArea.WorkTop-workArea.MonitorTop) * scaleY)
+								logicalRight = int(float64(workArea.WorkRight-workArea.MonitorLeft) * scaleX)
+								logicalBottom = int(float64(workArea.WorkBottom-workArea.MonitorTop) * scaleY)
+							}
+
+							x := logicalRight - windowWidth - panelMargin
+							y := logicalBottom - windowHeight - panelMargin
+							x = clamp(x, logicalLeft+panelMargin, logicalRight-windowWidth)
+							y = clamp(y, logicalTop+panelMargin, logicalBottom-windowHeight)
 							wailsRuntime.WindowSetPosition(appCtx, x, y)
 							break
 						}
