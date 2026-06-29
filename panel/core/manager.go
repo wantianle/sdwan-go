@@ -328,8 +328,12 @@ func (m *SdwanManager) Shutdown() {
 	defer m.mu.Unlock()
 	if m.connected {
 		m.stopCore()
+	} else {
+		m.cleanupAdapter()
 	}
-	// Clean up stale wintun adapter so next start is fresh
+}
+
+func (m *SdwanManager) cleanupAdapter() {
 	hiddenCommand("wmic", "path", "Win32_NetworkAdapter",
 		"where", "NetConnectionID='iwan1'", "delete").Run()
 }
@@ -525,6 +529,9 @@ func (m *SdwanManager) startCore() {
 
 	m.connected = true
 	log.Printf("[CORE] Started sdwan.exe (PID: %d), server=%s", m.cmd.Process.Pid, m.getCurrentServerName())
+	if m.onStateChange != nil {
+		m.onStateChange()
+	}
 
 	// Monitor process exit
 	go func() {
@@ -557,6 +564,7 @@ func (m *SdwanManager) startCore() {
 func (m *SdwanManager) stopCore() {
 	if m.cmd == nil || m.cmd.Process == nil {
 		m.connected = false
+		m.cleanupAdapter()
 		return
 	}
 
@@ -577,7 +585,12 @@ func (m *SdwanManager) stopCore() {
 		m.logFile = nil
 	}
 
+	m.cleanupAdapter()
+
 	log.Printf("[CORE] Stopped sdwan.exe (PID: %d)", pid)
+	if m.onStateChange != nil {
+		m.onStateChange()
+	}
 }
 
 // --- latency probe ---------------------------------------------------

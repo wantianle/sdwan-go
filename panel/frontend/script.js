@@ -20,6 +20,11 @@ document.addEventListener('DOMContentLoaded', () => {
     stopPolling();
   });
 
+  window.runtime.EventsOn('panel:state-changed', () => {
+    refreshStatus();
+    refreshServers();
+  });
+
   // Toggle connection (Wails returns Promises — must use .then)
   toggleInput.addEventListener('change', () => {
     window.go.main.App.ToggleConnection().then(connected => {

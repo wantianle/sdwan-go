@@ -25,6 +25,11 @@ func NewApp() *App {
 // startup is called by Wails when the application starts.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	a.manager.SetStateChangeCallback(func() {
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "panel:state-changed")
+		}
+	})
 	go a.manager.WatchIwanConf(func() {
 		log.Println("[APP] iwan.conf changed, restarting...")
 		a.manager.Reload()

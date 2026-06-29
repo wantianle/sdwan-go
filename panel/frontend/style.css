@@ -28,7 +28,6 @@ body {
   background: #ffffff;
   border: 1px solid #d9dde4;
   border-radius: 0;
-  box-shadow: 0 6px 18px rgba(31, 41, 55, 0.14);
 }
 
 #panel {
@@ -58,7 +57,7 @@ body {
   width: 24px;
   height: 24px;
   border: 1px solid #d4d9e1;
-  border-radius: 6px;
+  border-radius: 0;
   background: #ffffff;
   color: #5f6b7a;
   font-size: 13px;
@@ -147,7 +146,7 @@ body {
   inset: 0;
   cursor: pointer;
   background: #d9dde3;
-  border-radius: 999px;
+  border-radius: 0;
   transition: background 0.2s ease;
 }
 
@@ -158,7 +157,7 @@ body {
   bottom: 2px;
   width: 24px;
   height: 24px;
-  border-radius: 50%;
+  border-radius: 0;
   background: #ffffff;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.18);
   transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
@@ -218,7 +217,7 @@ input:checked + .slider::before {
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: 0;
   border: 1px solid transparent;
   background: #ffffff;
   cursor: pointer;
@@ -277,7 +276,7 @@ input:checked + .slider::before {
 .action-btn {
   padding: 7px 12px;
   border: 1px solid #d9dde4;
-  border-radius: 8px;
+  border-radius: 0;
   background: #ffffff;
   color: #2563eb;
   font-size: 12px;
