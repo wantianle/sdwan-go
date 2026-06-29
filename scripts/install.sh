@@ -12,6 +12,7 @@ set -euo pipefail
 REPO_OWNER="wantianle"
 REPO_NAME="sdwan-go"
 REPO_BRANCH="master"
+GH_PROXY="https://ghproxy.com/"  # GitHub mirror for users who cannot access GitHub directly
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/sdwan"
 CONFIG_FILE="$CONFIG_DIR/iwan.conf"
@@ -120,24 +121,28 @@ EOF
 # ────────────────────────────────────────────────────────────
 download_binary() {
     local binary="$1"
-    local url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download/${binary}"
-    # Fallback: raw main branch
-    local raw_url="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/dist/${binary}"
+    local direct_url="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/dist/${binary}"
+    local proxy_url="${GH_PROXY}${direct_url}"
+    local release_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download/${binary}"
 
     local dest="$INSTALL_DIR/sdwan"
     echo -e "${B}📥 下载 $binary ...${NC}"
 
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$raw_url" -o "$dest" 2>/dev/null || {
-            echo -e "${Y}⚠️  raw URL 不可用，尝试 Releases ...${NC}"
-            curl -fsSL "$url" -o "$dest" 2>/dev/null || {
-                echo -e "${R}❌ 下载失败。请确认 GitHub Release 中存在 $binary${NC}"
-                exit 1
-            }
+        # Try proxy first, then direct, then releases
+        curl -fsSL "$proxy_url" -o "$dest" 2>/dev/null || \
+        curl -fsSL "$direct_url" -o "$dest" 2>/dev/null || \
+        curl -fsSL "${GH_PROXY}${release_url}" -o "$dest" 2>/dev/null || \
+        curl -fsSL "$release_url" -o "$dest" 2>/dev/null || {
+            echo -e "${R}❌ 所有下载方式均失败，请检查网络${NC}"
+            exit 1
         }
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "$raw_url" -O "$dest" 2>/dev/null || wget -q "$url" -O "$dest" 2>/dev/null || {
-            echo -e "${R}❌ 下载失败${NC}"
+        wget -q "$proxy_url" -O "$dest" 2>/dev/null || \
+        wget -q "$direct_url" -O "$dest" 2>/dev/null || \
+        wget -q "${GH_PROXY}${release_url}" -O "$dest" 2>/dev/null || \
+        wget -q "$release_url" -O "$dest" 2>/dev/null || {
+            echo -e "${R}❌ 所有下载方式均失败，请检查网络${NC}"
             exit 1
         }
     else

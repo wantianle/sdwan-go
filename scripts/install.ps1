@@ -36,11 +36,17 @@ function Download-File {
     Write-Host "  下载: $(Split-Path $Dest -Leaf) ... " -NoNewline
     try {
         $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
-        Write-Host "OK" -ForegroundColor Green
+        # Try proxy first, then direct
+        Invoke-WebRequest -Uri "https://ghproxy.com/$Url" -OutFile $Dest -UseBasicParsing -ErrorAction Stop
+        Write-Host "OK (proxy)" -ForegroundColor Green
     } catch {
-        Write-Host "FAILED" -ForegroundColor Red
-        throw "Download failed: $Url"
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -ErrorAction Stop
+            Write-Host "OK" -ForegroundColor Green
+        } catch {
+            Write-Host "FAILED" -ForegroundColor Red
+            throw "Download failed: $Url"
+        }
     }
 }
 

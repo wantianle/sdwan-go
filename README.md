@@ -22,8 +22,8 @@ sdwan-go/
 │   ├── core/manager.go
 │   └── frontend/
 ├── scripts/
-│   ├── install.sh
-│   └── install.ps1
+│   ├── install.sh / uninstall.sh
+│   └── install.ps1 / uninstall.ps1
 ├── iwan.conf
 ├── Makefile / go.mod / go.sum
 └── README.md
@@ -33,12 +33,26 @@ sdwan-go/
 
 **Linux / macOS：**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.sh | sudo bash
+curl -fsSL https://ghproxy.com/https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.sh | sudo bash
 ```
 
 **Windows（管理员 PowerShell）：**
 ```powershell
-iwr -useb https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.ps1 | iex
+iwr -useb https://ghproxy.com/https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.ps1 | iex
+```
+
+> 无法访问 GitHub 时走 ghproxy 镜像；能直连的话把 `ghproxy.com/` 前缀去掉即可。
+
+## 卸载
+
+**Linux / macOS：**
+```bash
+curl -fsSL https://ghproxy.com/https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/uninstall.sh | sudo bash
+```
+
+**Windows（管理员 PowerShell）：**
+```powershell
+iwr -useb https://ghproxy.com/https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/uninstall.ps1 | iex
 ```
 
 ## 验证隧道
@@ -46,37 +60,6 @@ iwr -useb https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/in
 ```bash
 ping 10.10.10.1
 ping hfs.minieye.tech    # 应解析到 192.168.x.x
-```
-
-## 停止 / 卸载
-
-**停止服务：**
-```bash
-# Linux
-sudo systemctl stop sdwan
-
-# macOS
-sudo launchctl stop com.minieye.sdwan
-
-# Windows
-右键托盘图标 → 退出
-```
-
-**卸载：**
-```bash
-# Linux
-sudo systemctl disable --now sdwan
-sudo rm /etc/systemd/system/sdwan.service /usr/local/bin/sdwan
-sudo rm -rf /etc/sdwan
-
-# macOS
-sudo launchctl bootout system /Library/LaunchDaemons/com.minieye.sdwan.plist
-sudo rm /Library/LaunchDaemons/com.minieye.sdwan.plist /usr/local/bin/sdwan
-sudo rm -rf /etc/sdwan
-
-# Windows
-schtasks /delete /tn "SDWAN Panel" /f
-rmdir /s C:\ProgramData\sdwan
 ```
 
 ## 配置文件 (iwan.conf)
