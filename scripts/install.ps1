@@ -8,6 +8,7 @@ $REPO_OWNER = "wantianle"
 $REPO_NAME  = "sdwan-go"
 $REPO_BRANCH = "master"
 $INSTALL_DIR = "C:\ProgramData\sdwan"
+$GH_PROXIES = @("https://ghproxy.com/", "https://ghproxy.net/", "https://gh-proxy.com/")  # GitHub mirrors, tried in order
 
 Write-Host "" -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════" -ForegroundColor Cyan
@@ -32,12 +33,18 @@ function Download-File {
     Write-Host "  下载: $name ... " -NoNewline
     $ProgressPreference = 'SilentlyContinue'
     foreach ($url in $Urls) {
-        # Try direct first (most reliable), then proxy
-        foreach ($try in @($url, "https://ghproxy.com/$url")) {
+        # Try direct first (most reliable), then each proxy mirror
+        $allTries = @($url)
+        foreach ($proxy in $GH_PROXIES) { $allTries += "${proxy}${url}" }
+        foreach ($try in $allTries) {
             try {
                 Invoke-WebRequest -Uri $try -OutFile $Dest -UseBasicParsing -ErrorAction Stop
-                $tag = if ($try -match 'ghproxy') { 'proxy' } else { 'direct' }
-                Write-Host "OK ($tag)" -ForegroundColor Green
+                if ($try -eq $url) {
+                    Write-Host "OK (direct)" -ForegroundColor Green
+                } else {
+                    $proxyName = $try.Split('/')[2]
+                    Write-Host "OK ($proxyName)" -ForegroundColor Green
+                }
                 return
             } catch {
                 $msg = $_.Exception.Message

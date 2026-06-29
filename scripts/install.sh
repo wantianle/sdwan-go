@@ -12,7 +12,7 @@ set -euo pipefail
 REPO_OWNER="wantianle"
 REPO_NAME="sdwan-go"
 REPO_BRANCH="master"
-GH_PROXY="https://ghproxy.com/"  # GitHub mirror for users who cannot access GitHub directly
+GH_PROXIES=("https://ghproxy.com/" "https://ghproxy.net/" "https://gh-proxy.com/")  # GitHub mirrors, tried in order
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/sdwan"
 CONFIG_FILE="$CONFIG_DIR/iwan.conf"
@@ -121,24 +121,32 @@ EOF
 # ────────────────────────────────────────────────────────────
 download_binary() {
     local binary="$1"
-    local direct_url="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/dist/${binary}"
-    local proxy_url="${GH_PROXY}${direct_url}"
+    local raw_url="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/dist/${binary}"
     local release_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download/${binary}"
-
     local dest="$INSTALL_DIR/sdwan"
+
     echo -e "${B}📥 下载 $binary ...${NC}"
 
-    # Try silently first, then with progress bar on the last attempt
-    for url in "$proxy_url" "$direct_url" "${GH_PROXY}${release_url}"; do
-        if curl -fsSL "$url" -o "$dest" 2>/dev/null; then
-            echo -e "${G}✅ 下载完成 ($(du -h "$dest" | cut -f1))${NC}"
-            return 0
-        fi
+    # Try each proxy mirror for raw dist and release URLs silently
+    for mirror in "${GH_PROXIES[@]}"; do
+        for base in "$raw_url" "$release_url"; do
+            if curl -fsSL "${mirror}${base}" -o "$dest" 2>/dev/null; then
+                echo -e "${G}✅ 下载完成 (via ${mirror%%/*}, $(du -h "$dest" | cut -f1))${NC}"
+                return 0
+            fi
+        done
     done
-    # Last try with progress bar visible
-    echo "  尝试直连 Release ..."
+
+    # Try direct raw dist (silent)
+    if curl -fsSL "$raw_url" -o "$dest" 2>/dev/null; then
+        echo -e "${G}✅ 下载完成 (direct, $(du -h "$dest" | cut -f1))${NC}"
+        return 0
+    fi
+
+    # Last resort: direct Release with progress bar
+    echo "  尝试直连 GitHub Release ..."
     if curl -fL --progress-bar "$release_url" -o "$dest"; then
-        echo -e "${G}✅ 下载完成 ($(du -h "$dest" | cut -f1))${NC}"
+        echo -e "${G}✅ 下载完成 (direct Release, $(du -h "$dest" | cut -f1))${NC}"
         return 0
     fi
 
@@ -146,7 +154,6 @@ download_binary() {
     exit 1
 
     chmod +x "$dest"
-    echo -e "${G}✅ 已安装到 $dest${NC}"
 }
 
 # ────────────────────────────────────────────────────────────
