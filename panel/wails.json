@@ -1,0 +1,14 @@
+{
+  "name": "sdwan-panel",
+  "outputfilename": "sdwan-panel",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": "",
+  "info": {
+    "productName": "SDWAN Panel",
+    "productVersion": "1.0.0",
+    "comments": "SD-WAN Tray Control Panel (Wails v2)"
+  }
+}
