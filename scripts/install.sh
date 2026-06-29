@@ -121,20 +121,18 @@ EOF
 # ────────────────────────────────────────────────────────────
 download_binary() {
     local binary="$1"
-    local raw_url="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/dist/${binary}"
     local release_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download/${binary}"
     local dest="$INSTALL_DIR/sdwan"
 
     echo -e "${B}📥 下载 $binary ...${NC}"
 
-    # Build ordered URL list: each proxy x (raw, release), then direct x (raw, release)
+    # Build ordered URL list: each proxy mirror then direct
     local -a urls=()
     for mirror in "${GH_PROXIES[@]}"; do
-        urls+=("${mirror}${raw_url} (${mirror%%/*} raw)" )
-        urls+=("${mirror}${release_url} (${mirror%%/*} Release)" )
+        local name="${mirror#*://}"; name="${name%/}"  # "ghproxy.com"
+        urls+=("${mirror}${release_url} (${name})" )
     done
-    urls+=("$raw_url (direct raw)")
-    urls+=("$release_url (direct Release)")
+    urls+=("$release_url (direct)")
 
     local total=${#urls[@]}
     local i=0
@@ -143,7 +141,7 @@ download_binary() {
         local url="${entry% (*}"
         local label="${entry##*(}"
         label="${label%)}"
-        printf "  [%d/%d] %-35s ... " "$i" "$total" "$label"
+        printf "  [%d/%d] %-20s ... " "$i" "$total" "$label"
         if curl -fsSL --connect-timeout 5 --max-time 30 "$url" -o "$dest" 2>/dev/null; then
             echo -e "${G}✅ $(du -h "$dest" | cut -f1)${NC}"
             chmod +x "$dest"
