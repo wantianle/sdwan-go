@@ -77,7 +77,7 @@ select_server() {
     echo -e "$cache" | column -t -s "|"
     echo "----------------------------------------------"
 
-    read -rp "选择服务器 (直接回车=1): " choice
+    read -rp "选择服务器 (直接回车=1): " choice </dev/tty
     case $choice in
         2) echo "dwan.minieye.tech" ;;
         3) echo "minieye.8866.org" ;;
@@ -96,7 +96,7 @@ write_config() {
     mkdir -p "$CONFIG_DIR"
 
     if [[ -f "$CONFIG_FILE" ]]; then
-        read -rp "配置已存在，覆盖? (y/n): " overwrite
+        read -rp "配置已存在，覆盖? (y/n): " overwrite </dev/tty
         [[ "$overwrite" != "y" && "$overwrite" != "Y" ]] && {
             echo -e "${G}✅ 保留现有配置${NC}"
             return
@@ -258,8 +258,8 @@ main() {
     SERVER=$(select_server)
     echo -e "${G}✅ 服务器: $SERVER${NC}"
 
-    read -rp "👤 工号 (username): " USERNAME
-    read -rsp "🔑 密码 (password): " PASSWORD
+    read -rp "👤 工号 (username): " USERNAME </dev/tty
+    read -rsp "🔑 密码 (password): " PASSWORD </dev/tty
     echo
 
     write_config "$SERVER" "$USERNAME" "$PASSWORD"
