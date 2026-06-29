@@ -8,6 +8,10 @@ $INSTALL_DIR = "C:\ProgramData\sdwan"
 $START_MENU_DIR = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs"
 $SHORTCUT_PATH = Join-Path $START_MENU_DIR "SDWAN Panel.lnk"
 $GH_PROXIES = @("https://gh-proxy.com/", "https://gh.ddlc.top/", "https://gh.idayer.com/")  # GitHub mirrors (verified working 2025-06-29)
+$DOWNLOAD_CONNECT_TIMEOUT_MS = 15000
+$DOWNLOAD_READ_TIMEOUT_MS = 15000
+$DOWNLOAD_OVERALL_TIMEOUT_SEC = 90
+$DOWNLOAD_BUFFER_SIZE = 65536
 
 Write-Host ""
 Write-Host "===========================================" -ForegroundColor Cyan
@@ -28,9 +32,90 @@ Write-Host "[1/5] Install dir: $INSTALL_DIR" -ForegroundColor Green
 # ────────────────────────────────────────────────────────────
 function Download-File {
     param($Urls, $Dest)
+
+    function Format-Bytes {
+        param([Int64]$Bytes)
+        if ($Bytes -lt 1KB) { return "$Bytes B" }
+        if ($Bytes -lt 1MB) { return "{0:N1} KB" -f ($Bytes / 1KB) }
+        if ($Bytes -lt 1GB) { return "{0:N1} MB" -f ($Bytes / 1MB) }
+        return "{0:N1} GB" -f ($Bytes / 1GB)
+    }
+
+    function Download-WithProgress {
+        param(
+            [string]$Uri,
+            [string]$OutFile,
+            [string]$Activity,
+            [string]$Status,
+            [int]$ProgressId
+        )
+
+        $request = [System.Net.HttpWebRequest]::Create($Uri)
+        $request.Method = "GET"
+        $request.AllowAutoRedirect = $true
+        $request.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
+        $request.Timeout = $DOWNLOAD_CONNECT_TIMEOUT_MS
+        $request.ReadWriteTimeout = $DOWNLOAD_READ_TIMEOUT_MS
+        $request.UserAgent = "sdwan-go-installer"
+
+        $response = $null
+        $responseStream = $null
+        $fileStream = $null
+
+        try {
+            $response = $request.GetResponse()
+            $responseStream = $response.GetResponseStream()
+            $fileStream = [System.IO.File]::Open($OutFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+
+            $buffer = New-Object byte[] $DOWNLOAD_BUFFER_SIZE
+            $totalBytes = if ($response.ContentLength -ge 0) { [Int64]$response.ContentLength } else { -1 }
+            $downloadedBytes = [Int64]0
+            $startTime = Get-Date
+            $lastProgressAt = Get-Date "2000-01-01"
+
+            while ($true) {
+                if (((Get-Date) - $startTime).TotalSeconds -ge $DOWNLOAD_OVERALL_TIMEOUT_SEC) {
+                    throw "overall timeout after ${DOWNLOAD_OVERALL_TIMEOUT_SEC}s"
+                }
+
+                $read = $responseStream.Read($buffer, 0, $buffer.Length)
+                if ($read -le 0) { break }
+
+                $fileStream.Write($buffer, 0, $read)
+                $downloadedBytes += $read
+
+                $now = Get-Date
+                if (($now - $lastProgressAt).TotalMilliseconds -ge 200) {
+                    $elapsed = ($now - $startTime).TotalSeconds
+                    $speed = if ($elapsed -gt 0) { [Int64]($downloadedBytes / $elapsed) } else { 0 }
+
+                    if ($totalBytes -gt 0) {
+                        $percent = [Math]::Min(100, [int](($downloadedBytes * 100) / $totalBytes))
+                        $progressStatus = "$(Format-Bytes $downloadedBytes) / $(Format-Bytes $totalBytes) at $(Format-Bytes $speed)/s"
+                        Write-Progress -Id $ProgressId -Activity $Activity -Status $Status -CurrentOperation $progressStatus -PercentComplete $percent
+                    } else {
+                        $progressStatus = "$(Format-Bytes $downloadedBytes) at $(Format-Bytes $speed)/s"
+                        Write-Progress -Id $ProgressId -Activity $Activity -Status $Status -CurrentOperation $progressStatus -PercentComplete -1
+                    }
+                    $lastProgressAt = $now
+                }
+            }
+
+            $elapsedSec = ((Get-Date) - $startTime).TotalSeconds
+            Write-Progress -Id $ProgressId -Activity $Activity -Completed
+            return @{
+                Bytes = $downloadedBytes
+                Seconds = $elapsedSec
+            }
+        } finally {
+            if ($fileStream) { $fileStream.Dispose() }
+            if ($responseStream) { $responseStream.Dispose() }
+            if ($response) { $response.Dispose() }
+        }
+    }
+
     $name = Split-Path $Urls[0] -Leaf
     Write-Host "  Download: $name"
-    $ProgressPreference = 'SilentlyContinue'
     $allTries = @()
     foreach ($proxy in $GH_PROXIES) { $allTries += "${proxy}$($Urls[0])" }
     $allTries += $Urls[0]
@@ -42,15 +127,22 @@ function Download-File {
         } else {
             'direct'
         }
-        Write-Host ("    [{0}/{1}] {2} ... " -f ($i + 1), $allTries.Count, $label) -NoNewline
+        Write-Host ("    [{0}/{1}] {2}" -f ($i + 1), $allTries.Count, $label)
         try {
-            Invoke-WebRequest -Uri $try -OutFile $Dest -UseBasicParsing -ErrorAction Stop
-            Write-Host "OK" -ForegroundColor Green
+            if (Test-Path $Dest) {
+                Remove-Item $Dest -Force -ErrorAction SilentlyContinue
+            }
+            $result = Download-WithProgress -Uri $try -OutFile $Dest -Activity "Downloading $name" -Status $label -ProgressId 1
+            Write-Host ("      OK ({0} in {1:N1}s)" -f (Format-Bytes $result.Bytes), $result.Seconds) -ForegroundColor Green
             return
         } catch {
+            Write-Progress -Id 1 -Activity "Downloading $name" -Completed
+            if (Test-Path $Dest) {
+                Remove-Item $Dest -Force -ErrorAction SilentlyContinue
+            }
             $msg = $_.Exception.Message
             if ($msg.Length -gt 100) { $msg = $msg.Substring(0, 100) + "..." }
-            Write-Host "FAILED" -ForegroundColor Yellow
+            Write-Host "      FAILED" -ForegroundColor Yellow
             Write-Host "      -> $msg" -ForegroundColor DarkYellow
         }
     }
@@ -117,14 +209,40 @@ $servers = @(
     @{Name="youjia.8866.org"; Desc="Telecom dedicated 50M (finance)"}
 )
 
+function Get-TcpLatencyMs {
+    param(
+        [string]$Host,
+        [int]$Port = 443,
+        [int]$TimeoutMs = 2000
+    )
+
+    $client = New-Object System.Net.Sockets.TcpClient
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+
+    try {
+        $async = $client.BeginConnect($Host, $Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+            return -1
+        }
+
+        $client.EndConnect($async)
+        $watch.Stop()
+        return [Math]::Max(1, [int]$watch.ElapsedMilliseconds)
+    } catch {
+        return -1
+    } finally {
+        if ($watch.IsRunning) { $watch.Stop() }
+        $client.Close()
+    }
+}
+
 for ($i=0; $i -lt $servers.Count; $i++) {
     $s = $servers[$i]
     $lat = "timeout/unreachable"
     $latColor = "DarkGray"
     try {
-        $ping = Test-Connection -ComputerName $s.Name -Count 1 -TimeoutSeconds 2000 -ErrorAction SilentlyContinue
-        if ($ping) {
-            $ms = [int]$ping.ResponseTime
+        $ms = Get-TcpLatencyMs -Host $s.Name -Port 443 -TimeoutMs 2000
+        if ($ms -gt 0) {
             $lat = "${ms}ms"
             if ($ms -lt 20) {
                 $latColor = "Green"

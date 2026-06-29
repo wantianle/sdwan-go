@@ -273,6 +273,12 @@ func (m *SdwanManager) EditConfig() error {
 	return exec.Command("notepad", m.iwanPath).Start()
 }
 
+func hiddenCommand(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	return cmd
+}
+
 // NeedsRestart returns true if the server in iwan.conf differs from the
 // server currently running. Used by WatchIwanConf to avoid restarting the
 // tunnel for unrelated config edits (MTU, password, etc.).
@@ -311,7 +317,7 @@ func (m *SdwanManager) Shutdown() {
 		m.stopCore()
 	}
 	// Clean up stale wintun adapter so next start is fresh
-	exec.Command("wmic", "path", "Win32_NetworkAdapter",
+	hiddenCommand("wmic", "path", "Win32_NetworkAdapter",
 		"where", "NetConnectionID='iwan1'", "delete").Run()
 }
 
@@ -487,9 +493,8 @@ func (m *SdwanManager) startCore() {
 	}
 	m.logFile = lf
 
-	m.cmd = exec.Command(exePath)
+	m.cmd = hiddenCommand(exePath)
 	m.cmd.Dir = m.exeDir
-	m.cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
 	if lf != nil {
 		m.cmd.Stdout = lf
@@ -545,7 +550,7 @@ func (m *SdwanManager) stopCore() {
 	pid := m.cmd.Process.Pid
 
 	// Try graceful shutdown via taskkill
-	taskkill := exec.Command("taskkill", "/PID", fmt.Sprintf("%d", pid))
+	taskkill := hiddenCommand("taskkill", "/PID", fmt.Sprintf("%d", pid))
 	if err := taskkill.Run(); err != nil {
 		log.Printf("[CORE] taskkill failed, force killing: %v", err)
 		m.cmd.Process.Kill()
