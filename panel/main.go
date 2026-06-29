@@ -19,6 +19,12 @@ var assets embed.FS
 // appCtx holds the Wails runtime context for window operations.
 var appCtx context.Context
 
+const (
+	panelWidth  = 280
+	panelHeight = 380
+	panelMargin = 16
+)
+
 func main() {
 	// Crash recovery — log panics instead of silently exiting
 	defer func() {
@@ -47,11 +53,15 @@ func main() {
 				panelJustShown.Store(true)
 				app.OnPanelShown() // resume probes + immediate refresh
 				wailsRuntime.WindowShow(appCtx)
-				if screens, err := wailsRuntime.ScreenGetAll(appCtx); err == nil {
+				if workArea, ok := primaryWorkArea(); ok {
+					x := int(workArea.Right) - panelWidth - panelMargin
+					y := int(workArea.Bottom) - panelHeight - panelMargin
+					wailsRuntime.WindowSetPosition(appCtx, x, y)
+				} else if screens, err := wailsRuntime.ScreenGetAll(appCtx); err == nil {
 					for _, s := range screens {
 						if s.IsPrimary {
-							x := s.Size.Width - 280 - 16    // 16px right margin
-							y := s.Size.Height - 380 - 16   // 16px bottom margin
+							x := s.Size.Width - panelWidth - panelMargin
+							y := s.Size.Height - panelHeight - panelMargin
 							wailsRuntime.WindowSetPosition(appCtx, x, y)
 							break
 						}
@@ -73,8 +83,8 @@ func main() {
 	log.Println("[DEBUG] Starting Wails...")
 	err := wails.Run(&options.App{
 		Title:       "SDWAN Panel",
-		Width:       280,
-		Height:      380,
+		Width:       panelWidth,
+		Height:      panelHeight,
 		Frameless:   true,
 		StartHidden: true,
 
