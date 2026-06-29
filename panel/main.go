@@ -51,7 +51,7 @@ func main() {
 					for _, s := range screens {
 						if s.IsPrimary {
 							x := s.Size.Width - 280 - 16    // 16px right margin
-							y := s.Size.Height - 380 - 56   // 56px for taskbar
+							y := s.Size.Height - 380 - 16   // 16px bottom margin
 							wailsRuntime.WindowSetPosition(appCtx, x, y)
 							break
 						}

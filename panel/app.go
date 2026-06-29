@@ -35,6 +35,7 @@ func (a *App) startup(ctx context.Context) {
 		log.Println("[APP] iwan.conf changed, restarting...")
 		a.manager.Reload()
 	})
+	a.manager.AutoConnect()
 }
 
 // --- Exported methods (called from frontend JS) ----------------------------
@@ -64,11 +65,14 @@ func (a *App) Reload() bool {
 }
 
 func (a *App) HidePanel() {
-	// Suspend probes when panel is hidden — no point wasting CPU
-	a.manager.SuspendProbes()
-
 	if panelJustShown.Swap(false) {
 		return
+	}
+
+	// Suspend probes when panel is hidden — no point wasting CPU
+	a.manager.SuspendProbes()
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "panel:hidden")
 	}
 	if a.ctx != nil {
 		runtime.WindowHide(a.ctx)
@@ -79,6 +83,10 @@ func (a *App) HidePanel() {
 // It resumes latency probes and triggers an immediate refresh.
 func (a *App) OnPanelShown() {
 	a.manager.ResumeProbes()
+	a.manager.AutoConnect()
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "panel:shown")
+	}
 }
 
 func (a *App) Shutdown() {

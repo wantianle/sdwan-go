@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,6 +47,9 @@ type SdwanManager struct {
 	stopCh          chan struct{}    // signals the latency probe to stop
 	probeTrigger    chan struct{}    // triggers an immediate probe
 	probePaused     atomic.Bool      // true = probes suspended (panel hidden)
+	autoConnecting  atomic.Bool
+	manualChangeSeq atomic.Uint64
+	lastAutoAttempt atomic.Int64
 	onStateChange   func()           // optional callback for UI refresh
 }
 
@@ -69,6 +73,7 @@ func GetManager() *SdwanManager {
 			probeTrigger:  make(chan struct{}, 1),
 		}
 		m.loadConfig()
+		go m.latencyProbe()
 		instance = m
 	})
 	return instance
@@ -130,6 +135,7 @@ func (m *SdwanManager) GetStatus() map[string]interface{} {
 	return map[string]interface{}{
 		"connected":      m.connected,
 		"latency":        m.latency,
+		"latency_text":   formatLatency(m.latency),
 		"current_server": m.getCurrentServerName(),
 	}
 }
@@ -157,6 +163,7 @@ func (m *SdwanManager) GetServers() []map[string]string {
 
 // ToggleConnection starts or stops the sdwan.exe subprocess.
 func (m *SdwanManager) ToggleConnection() bool {
+	m.manualChangeSeq.Add(1)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -170,6 +177,7 @@ func (m *SdwanManager) ToggleConnection() bool {
 
 // SelectServer sets the active server. If connected, reconnects with the new server.
 func (m *SdwanManager) SelectServer(id string) bool {
+	m.manualChangeSeq.Add(1)
 	m.mu.Lock()
 
 	found := false
@@ -216,6 +224,50 @@ func (m *SdwanManager) Reload() bool {
 	return true
 }
 
+// AutoConnect attempts one bounded startup connection pass.
+// Order: current server first, then remaining servers by lowest known latency,
+// falling back to config order for unknown latencies.
+func (m *SdwanManager) AutoConnect() {
+	if m.connected {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := m.lastAutoAttempt.Load()
+	if last != 0 && now-last < int64(30*time.Second) {
+		return
+	}
+	if !m.lastAutoAttempt.CompareAndSwap(last, now) && m.lastAutoAttempt.Load() != now {
+		return
+	}
+	if !m.autoConnecting.CompareAndSwap(false, true) {
+		return
+	}
+
+	go func(seq uint64) {
+		defer m.autoConnecting.Store(false)
+
+		if m.isManualSequenceChanged(seq) || m.isConnected() {
+			return
+		}
+
+		m.probeOnce()
+		candidates := m.autoConnectCandidates()
+		for _, id := range candidates {
+			if m.isManualSequenceChanged(seq) || m.isConnected() {
+				return
+			}
+			if !m.tryAutoConnectCandidate(id) {
+				continue
+			}
+			if m.waitForStableConnection(8 * time.Second, seq) {
+				log.Printf("[AUTO] Connected using server %s", id)
+				return
+			}
+		}
+		log.Println("[AUTO] No server established a stable startup connection")
+	}(m.manualChangeSeq.Load())
+}
+
 // EditConfig opens iwan.conf with Windows Notepad.
 func (m *SdwanManager) EditConfig() error {
 	return exec.Command("notepad", m.iwanPath).Start()
@@ -233,7 +285,6 @@ func (m *SdwanManager) NeedsRestart() bool {
 	return current != cfgServer
 }
 
-// Shutdown gracefully stops the core and persists state.
 // ResumeProbes unpauses the latency probe and fires an immediate probe cycle.
 func (m *SdwanManager) ResumeProbes() {
 	m.probePaused.Store(false)
@@ -249,6 +300,11 @@ func (m *SdwanManager) SuspendProbes() {
 }
 
 func (m *SdwanManager) Shutdown() {
+	select {
+	case m.stopCh <- struct{}{}:
+	default:
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.connected {
@@ -257,6 +313,102 @@ func (m *SdwanManager) Shutdown() {
 	// Clean up stale wintun adapter so next start is fresh
 	exec.Command("wmic", "path", "Win32_NetworkAdapter",
 		"where", "NetConnectionID='iwan1'", "delete").Run()
+}
+
+func (m *SdwanManager) isConnected() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.connected
+}
+
+func (m *SdwanManager) isManualSequenceChanged(seq uint64) bool {
+	return m.manualChangeSeq.Load() != seq
+}
+
+func (m *SdwanManager) autoConnectCandidates() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	type candidate struct {
+		id      string
+		latency int64
+		index   int
+	}
+
+	current := m.config.CurrentServer
+	remaining := make([]candidate, 0, len(m.config.Servers))
+	ordered := make([]string, 0, len(m.config.Servers))
+
+	for i, s := range m.config.Servers {
+		if s.ID == current {
+			ordered = append(ordered, s.ID)
+			continue
+		}
+		remaining = append(remaining, candidate{id: s.ID, latency: m.serverLatency[s.ID], index: i})
+	}
+
+	sort.SliceStable(remaining, func(i, j int) bool {
+		li, lj := remaining[i].latency, remaining[j].latency
+		ki := li > 0
+		kj := lj > 0
+		if ki != kj {
+			return ki
+		}
+		if ki && lj != li {
+			return li < lj
+		}
+		return remaining[i].index < remaining[j].index
+	})
+
+	for _, c := range remaining {
+		ordered = append(ordered, c.id)
+	}
+	return ordered
+}
+
+func (m *SdwanManager) tryAutoConnectCandidate(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.connected {
+		return true
+	}
+
+	found := false
+	for _, s := range m.config.Servers {
+		if s.ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false
+	}
+
+	m.config.CurrentServer = id
+	if err := m.saveConfig(); err != nil {
+		log.Printf("[AUTO] Failed to save config for server %s: %v", id, err)
+	}
+	if err := m.syncIwanConf(); err != nil {
+		log.Printf("[AUTO] Failed to sync iwan.conf for server %s: %v", id, err)
+	}
+	log.Printf("[AUTO] Trying server %s (%s)", id, m.getCurrentServerName())
+	m.startCore()
+	return m.connected
+}
+
+func (m *SdwanManager) waitForStableConnection(timeout time.Duration, seq uint64) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if m.isManualSequenceChanged(seq) {
+			return false
+		}
+		if !m.isConnected() {
+			return false
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return m.isConnected() && !m.isManualSequenceChanged(seq)
 }
 
 // --- iwan.conf sync -------------------------------------------------
@@ -354,7 +506,6 @@ func (m *SdwanManager) startCore() {
 	}
 
 	m.connected = true
-	m.stopCh = make(chan struct{})
 	log.Printf("[CORE] Started sdwan.exe (PID: %d), server=%s", m.cmd.Process.Pid, m.getCurrentServerName())
 
 	// Monitor process exit
@@ -383,20 +534,12 @@ func (m *SdwanManager) startCore() {
 		}
 	}()
 
-	// Start latency probe
-	go m.latencyProbe()
 }
 
 func (m *SdwanManager) stopCore() {
 	if m.cmd == nil || m.cmd.Process == nil {
 		m.connected = false
 		return
-	}
-
-	// Signal latency probe to stop
-	select {
-	case m.stopCh <- struct{}{}:
-	default:
 	}
 
 	pid := m.cmd.Process.Pid
@@ -452,9 +595,7 @@ func (m *SdwanManager) probeOnce() {
 			defer wg.Done()
 			lat := probeLatency(sname)
 			m.mu.Lock()
-			if lat > 0 {
-				m.serverLatency[sid] = lat
-			}
+			m.serverLatency[sid] = lat
 			m.mu.Unlock()
 		}(s.ID, s.Name)
 	}
@@ -464,6 +605,8 @@ func (m *SdwanManager) probeOnce() {
 	m.mu.Lock()
 	if ms, ok := m.serverLatency[m.config.CurrentServer]; ok {
 		m.latency = ms
+	} else {
+		m.latency = 0
 	}
 	m.mu.Unlock()
 
@@ -474,8 +617,11 @@ func (m *SdwanManager) probeOnce() {
 
 // formatLatency converts a latency value to a display string.
 func formatLatency(ms int64) string {
-	if ms <= 0 {
-		return ""
+	if ms < 0 {
+		return "timeout/unreachable"
+	}
+	if ms == 0 {
+		return "--"
 	}
 	if ms < 1 {
 		return "<1ms"

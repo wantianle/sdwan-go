@@ -4,14 +4,21 @@ const statusLabel   = document.getElementById('status-label');
 const statusLatency = document.getElementById('status-latency');
 const toggleInput   = document.getElementById('toggle-connection');
 const serverListEl  = document.getElementById('server-list');
+const closeButton   = document.getElementById('btn-close');
 
 // ---- State ----
 let currentServerId = '';
+let pollTimer = null;
 
 // ---- Init ----
 document.addEventListener('DOMContentLoaded', () => {
-  refreshStatus();
-  refreshServers();
+  window.runtime.EventsOn('panel:shown', () => {
+    startPolling();
+  });
+
+  window.runtime.EventsOn('panel:hidden', () => {
+    stopPolling();
+  });
 
   // Toggle connection (Wails returns Promises — must use .then)
   toggleInput.addEventListener('change', () => {
@@ -35,15 +42,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // Hide panel
-  document.getElementById('btn-hide').addEventListener('click', () => {
-    window.go.main.App.HidePanel();
-  });
-
-  // Periodic refresh every 5s when panel visible.
-  // Probe goroutine is suspended when panel hides (CPU idle).
-  setInterval(refreshStatus, 5000);
-  setInterval(refreshServers, 5000);
+  closeButton.addEventListener('click', hidePanel);
 });
 
 // ---- API helpers ----
@@ -54,34 +53,41 @@ function refreshStatus() {
 
 function refreshServers() {
   window.go.main.App.GetServers().then(servers => {
-    // Preserve DOM elements we already have to avoid flicker
-    const oldItems = {};
-    serverListEl.querySelectorAll('.server-item').forEach(el => {
-      oldItems[el.dataset.serverId] = el;
-    });
-
     serverListEl.innerHTML = '';
     servers.forEach(s => {
       if (s.selected === 'true') currentServerId = s.id;
-      const existing = oldItems[s.id];
-      if (existing && existing.querySelector('.latency').textContent) {
-        renderServerItem(s, existing.querySelector('.latency').textContent);
-      } else {
-        renderServerItem(s, s.latency || '');
-      }
+      renderServerItem(s, s.latency || '--');
     });
   });
+}
+
+function startPolling() {
+  refreshStatus();
+  refreshServers();
+  stopPolling();
+  pollTimer = setInterval(() => {
+    refreshStatus();
+    refreshServers();
+  }, 5000);
+}
+
+function stopPolling() {
+  if (pollTimer !== null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function hidePanel() {
+  stopPolling();
+  window.go.main.App.HidePanel();
 }
 
 // ---- UI updaters ----
 
 function updateStatusUI(s) {
   updateConnectionUI(s.connected);
-  if (s.connected) {
-    statusLatency.textContent = s.latency > 0 ? s.latency + 'ms 延迟' : '连接中...';
-  } else {
-    statusLatency.textContent = '--';
-  }
+  statusLatency.textContent = s.latency_text || '--';
 }
 
 function updateConnectionUI(connected) {

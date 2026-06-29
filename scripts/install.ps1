@@ -5,6 +5,8 @@ $REPO_OWNER = "wantianle"
 $REPO_NAME  = "sdwan-go"
 $REPO_BRANCH = "master"
 $INSTALL_DIR = "C:\ProgramData\sdwan"
+$START_MENU_DIR = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs"
+$SHORTCUT_PATH = Join-Path $START_MENU_DIR "SDWAN Panel.lnk"
 $GH_PROXIES = @("https://gh-proxy.com/", "https://gh.ddlc.top/", "https://gh.idayer.com/")  # GitHub mirrors (verified working 2025-06-29)
 
 Write-Host ""
@@ -117,13 +119,28 @@ $servers = @(
 
 for ($i=0; $i -lt $servers.Count; $i++) {
     $s = $servers[$i]
-    $lat = "-"
+    $lat = "timeout/unreachable"
+    $latColor = "DarkGray"
     try {
         $ping = Test-Connection -ComputerName $s.Name -Count 1 -TimeoutSeconds 2000 -ErrorAction SilentlyContinue
-        if ($ping) { $lat = "$($ping.ResponseTime)ms" }
-    } catch {}
+        if ($ping) {
+            $ms = [int]$ping.ResponseTime
+            $lat = "${ms}ms"
+            if ($ms -lt 20) {
+                $latColor = "Green"
+            } elseif ($ms -le 80) {
+                $latColor = "Yellow"
+            } else {
+                $latColor = "Red"
+            }
+        }
+    } catch {
+        $latColor = "DarkGray"
+    }
     $mark = if ($i -eq 0) { " [default]" } else { "" }
-    Write-Host "  [$($i+1)] $($s.Name) - $($s.Desc)  $lat$mark"
+    Write-Host "  [$($i+1)] $($s.Name) - $($s.Desc)  " -NoNewline
+    Write-Host $lat -ForegroundColor $latColor -NoNewline
+    Write-Host $mark
 }
 
 $choice = Read-Host "`nSelect server (Enter = 1)"
@@ -181,6 +198,19 @@ if ($autoStart -ne "n") {
         /tr "$INSTALL_DIR\panel.exe" `
         /sc onstart /ru SYSTEM /rl highest /f 2>&1 | Out-Null
     Write-Host "  Auto-start task created: $taskName" -ForegroundColor Green
+}
+
+try {
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($SHORTCUT_PATH)
+    $shortcut.TargetPath = "$INSTALL_DIR\panel.exe"
+    $shortcut.WorkingDirectory = $INSTALL_DIR
+    $shortcut.IconLocation = "$INSTALL_DIR\panel.exe,0"
+    $shortcut.Description = "SDWAN Panel"
+    $shortcut.Save()
+    Write-Host "  Start Menu shortcut created: $SHORTCUT_PATH" -ForegroundColor Green
+} catch {
+    Write-Host "  Start Menu shortcut creation failed" -ForegroundColor Yellow
 }
 
 Write-Host "  Launching panel..." -ForegroundColor Cyan

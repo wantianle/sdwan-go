@@ -9,23 +9,30 @@
 
 $ErrorActionPreference = "SilentlyContinue"
 $INSTALL_DIR = "C:\ProgramData\sdwan"
+$SHORTCUT_PATH = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\SDWAN Panel.lnk"
 
-Write-Host "🗑️  正在卸载 SDWAN..." -ForegroundColor Yellow
+Write-Host "Removing SDWAN..." -ForegroundColor Yellow
 
 # Kill running processes
 Get-Process -Name "panel" | Stop-Process -Force
 Get-Process -Name "sdwan-windows-amd64" | Stop-Process -Force
-Write-Host "✅ 进程已终止" -ForegroundColor Green
+Write-Host "Processes stopped" -ForegroundColor Green
 
 # Remove scheduled task
 schtasks /delete /tn "SDWAN Panel" /f 2>&1 | Out-Null
-Write-Host "✅ 开机自启已移除" -ForegroundColor Green
+Write-Host "Auto-start task removed" -ForegroundColor Green
+
+# Remove Start Menu shortcut
+if (Test-Path $SHORTCUT_PATH) {
+    Remove-Item $SHORTCUT_PATH -Force
+    Write-Host "Start Menu shortcut removed" -ForegroundColor Green
+}
 
 # Delete install directory
 if (Test-Path $INSTALL_DIR) {
     Remove-Item -Recurse -Force $INSTALL_DIR
-    Write-Host "✅ $INSTALL_DIR 已删除" -ForegroundColor Green
+    Write-Host "$INSTALL_DIR removed" -ForegroundColor Green
 }
 
 Write-Host ""
-Write-Host "🗑️  卸载完成" -ForegroundColor Green
+Write-Host "Uninstall complete" -ForegroundColor Green

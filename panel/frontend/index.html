@@ -8,8 +8,12 @@
 </head>
 <body>
   <div id="panel">
+    <div class="panel-chrome" data-wails-drag>
+      <button class="chrome-close" id="btn-close" type="button" aria-label="Close panel">X</button>
+    </div>
+
     <!-- Status Header -->
-    <div class="status-header">
+    <div class="status-header" data-wails-drag>
       <div class="status-dot" id="status-dot"></div>
       <div class="status-text">
         <div class="status-label" id="status-label">已断开</div>
@@ -39,7 +43,6 @@
     <div class="actions">
       <button class="action-btn" id="btn-edit">编辑配置</button>
       <button class="action-btn" id="btn-reload">重新加载</button>
-      <button class="action-btn" id="btn-hide">隐藏面板</button>
     </div>
   </div>
 

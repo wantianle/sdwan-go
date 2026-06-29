@@ -16,3 +16,4 @@ Thumbs.db
 
 # Legacy TAP driver (replaced by wintun)
 dist.win10/
+.cortexkit/
