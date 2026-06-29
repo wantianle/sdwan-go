@@ -8,6 +8,7 @@ BUILD_DIR = cmd/sdwan
 .PHONY: all linux macos windows panel clean test vet tidy
 
 all: linux macos windows panel
+	cp wintun.dll $(DST)/
 	@ls -lh $(DST)/
 
 linux:
