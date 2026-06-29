@@ -8,68 +8,39 @@ html, body {
   width: 280px;
   height: 380px;
   overflow: hidden;
+  display: flex;
   background:
-    radial-gradient(circle at top left, rgba(166, 196, 255, 0.95), transparent 42%),
-    radial-gradient(circle at 82% 18%, rgba(255, 210, 226, 0.9), transparent 34%),
-    linear-gradient(160deg, #edf3ff 0%, #e8eefb 48%, #dde6f5 100%);
+    radial-gradient(circle at top left, rgba(174, 202, 255, 0.92), transparent 40%),
+    radial-gradient(circle at 82% 16%, rgba(255, 215, 230, 0.84), transparent 32%),
+    linear-gradient(160deg, #eef4ff 0%, #e8eef9 52%, #dde5f1 100%);
   font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   user-select: none;
   -webkit-user-select: none;
-  position: relative;
-}
-
-body::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.08) 52%, rgba(255, 255, 255, 0.3)),
-    radial-gradient(circle at 20% 0%, rgba(255, 255, 255, 0.75), transparent 38%);
-  pointer-events: none;
+  padding: 10px;
 }
 
 #panel {
+  flex: 1;
+  min-height: 0;
   position: relative;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(246, 249, 255, 0.68));
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.8), rgba(244, 248, 255, 0.72)),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.4), rgba(255, 255, 255, 0.14) 48%, rgba(221, 233, 255, 0.2));
+  backdrop-filter: blur(18px) saturate(135%);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
   border-radius: 18px;
   padding: 20px;
   display: flex;
   flex-direction: column;
   gap: 12px;
   box-shadow:
-    0 20px 40px rgba(63, 85, 126, 0.22),
-    0 6px 18px rgba(82, 103, 145, 0.14),
-    inset 0 1px 0 rgba(255, 255, 255, 0.8);
-  border: 1px solid rgba(255, 255, 255, 0.55);
-  isolation: isolate;
-}
-
-#panel::before,
-#panel::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-}
-
-#panel::before {
-  inset: 1px;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.18) 36%, rgba(255, 255, 255, 0.34) 100%),
-    radial-gradient(circle at top left, rgba(255, 255, 255, 0.8), transparent 28%),
-    radial-gradient(circle at bottom right, rgba(135, 170, 255, 0.14), transparent 32%);
-  opacity: 0.95;
-}
-
-#panel::after {
-  inset: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  opacity: 0.7;
+    0 18px 34px rgba(72, 92, 133, 0.2),
+    0 6px 16px rgba(98, 118, 160, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.5);
 }
 
 .panel-chrome {

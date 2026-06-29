@@ -211,7 +211,7 @@ $servers = @(
 
 function Get-TcpLatencyMs {
     param(
-        [string]$Host,
+        [string]$Server,
         [int]$Port = 443,
         [int]$TimeoutMs = 2000
     )
@@ -220,12 +220,16 @@ function Get-TcpLatencyMs {
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
 
     try {
-        $async = $client.BeginConnect($Host, $Port, $null, $null)
-        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
-            return -1
-        }
+        $async = $client.BeginConnect($Server, $Port, $null, $null)
+        try {
+            if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+                return -1
+            }
 
-        $client.EndConnect($async)
+            $client.EndConnect($async)
+        } finally {
+            $async.AsyncWaitHandle.Close()
+        }
         $watch.Stop()
         return [Math]::Max(1, [int]$watch.ElapsedMilliseconds)
     } catch {
@@ -241,7 +245,7 @@ for ($i=0; $i -lt $servers.Count; $i++) {
     $lat = "timeout/unreachable"
     $latColor = "DarkGray"
     try {
-        $ms = Get-TcpLatencyMs -Host $s.Name -Port 443 -TimeoutMs 2000
+        $ms = Get-TcpLatencyMs -Server $s.Name -Port 443 -TimeoutMs 2000
         if ($ms -gt 0) {
             $lat = "${ms}ms"
             if ($ms -lt 20) {
