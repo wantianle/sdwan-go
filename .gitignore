@@ -1,7 +1,6 @@
 # Build outputs
 dist/
 **/*.exe
-**/*.dll
 *.ico
 
 # Logs
