@@ -128,27 +128,22 @@ download_binary() {
     local dest="$INSTALL_DIR/sdwan"
     echo -e "${B}📥 下载 $binary ...${NC}"
 
-    if command -v curl >/dev/null 2>&1; then
-        # Try proxy first, then direct, then releases
-        curl -fsSL "$proxy_url" -o "$dest" 2>/dev/null || \
-        curl -fsSL "$direct_url" -o "$dest" 2>/dev/null || \
-        curl -fsSL "${GH_PROXY}${release_url}" -o "$dest" 2>/dev/null || \
-        curl -fsSL "$release_url" -o "$dest" 2>/dev/null || {
-            echo -e "${R}❌ 所有下载方式均失败，请检查网络${NC}"
-            exit 1
-        }
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q "$proxy_url" -O "$dest" 2>/dev/null || \
-        wget -q "$direct_url" -O "$dest" 2>/dev/null || \
-        wget -q "${GH_PROXY}${release_url}" -O "$dest" 2>/dev/null || \
-        wget -q "$release_url" -O "$dest" 2>/dev/null || {
-            echo -e "${R}❌ 所有下载方式均失败，请检查网络${NC}"
-            exit 1
-        }
-    else
-        echo -e "${R}❌ 需要 curl 或 wget${NC}"
-        exit 1
+    # Try silently first, then with progress bar on the last attempt
+    for url in "$proxy_url" "$direct_url" "${GH_PROXY}${release_url}"; do
+        if curl -fsSL "$url" -o "$dest" 2>/dev/null; then
+            echo -e "${G}✅ 下载完成 ($(du -h "$dest" | cut -f1))${NC}"
+            return 0
+        fi
+    done
+    # Last try with progress bar visible
+    echo "  尝试直连 Release ..."
+    if curl -fL --progress-bar "$release_url" -o "$dest"; then
+        echo -e "${G}✅ 下载完成 ($(du -h "$dest" | cut -f1))${NC}"
+        return 0
     fi
+
+    echo -e "${R}❌ 所有下载方式均失败，请检查网络${NC}"
+    exit 1
 
     chmod +x "$dest"
     echo -e "${G}✅ 已安装到 $dest${NC}"
@@ -255,6 +250,9 @@ main() {
     check_root
     detect_platform
 
+    # Download binary first — if this fails, no point configuring
+    download_binary "$BINARY"
+
     SERVER=$(select_server)
     echo -e "${G}✅ 服务器: $SERVER${NC}"
 
@@ -263,7 +261,6 @@ main() {
     echo
 
     write_config "$SERVER" "$USERNAME" "$PASSWORD"
-    download_binary "$BINARY"
 
     case "$OS" in
         linux)  install_linux_service ;;
