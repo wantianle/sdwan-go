@@ -196,6 +196,17 @@ func (m *SdwanManager) SelectServer(id string) bool {
 		return false
 	}
 
+	if m.config.CurrentServer == id {
+		wasConnected := m.connected
+		m.mu.Unlock()
+		if !wasConnected {
+			m.mu.Lock()
+			m.startCore()
+			m.mu.Unlock()
+		}
+		return true
+	}
+
 	wasConnected := m.connected
 	if wasConnected {
 		m.stopCore()
@@ -206,11 +217,9 @@ func (m *SdwanManager) SelectServer(id string) bool {
 	_ = m.saveConfig()
 	_ = m.syncIwanConf()
 
-	if wasConnected {
-		m.mu.Lock()
-		m.startCore()
-		m.mu.Unlock()
-	}
+	m.mu.Lock()
+	m.startCore()
+	m.mu.Unlock()
 	return true
 }
 
