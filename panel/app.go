@@ -3,17 +3,11 @@ package main
 import (
 	"context"
 	"log"
-	"sync/atomic"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"sdwan-panel/core"
 )
-
-// panelJustShown is set to true right before ShowPanel so the first blur
-// event (which fires immediately because the tray menu still has focus)
-// does not hide the panel.
-var panelJustShown atomic.Bool
 
 // App serves as the bridge between the Wails frontend and the
 // SD-WAN core manager.
@@ -65,17 +59,11 @@ func (a *App) Reload() bool {
 }
 
 func (a *App) HidePanel() {
-	if panelJustShown.Swap(false) {
-		return
-	}
-
 	// Suspend probes when panel is hidden — no point wasting CPU
 	a.manager.SuspendProbes()
 	if a.ctx != nil {
-		runtime.EventsEmit(a.ctx, "panel:hidden")
-	}
-	if a.ctx != nil {
 		runtime.WindowHide(a.ctx)
+		runtime.EventsEmit(a.ctx, "panel:hidden")
 	}
 }
 

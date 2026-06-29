@@ -7,42 +7,44 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="panel">
-    <div class="panel-chrome" data-wails-drag>
-      <button class="chrome-close" id="btn-close" type="button" aria-label="Close panel">X</button>
-    </div>
-
-    <!-- Status Header -->
-    <div class="status-header" data-wails-drag>
-      <div class="status-dot" id="status-dot"></div>
-      <div class="status-text">
-        <div class="status-label" id="status-label">已断开</div>
-        <div class="status-latency" id="status-latency">--</div>
+  <div id="app-root">
+    <div id="panel">
+      <div class="panel-chrome" data-wails-drag>
+        <button class="chrome-close" id="btn-close" type="button" aria-label="Close panel">X</button>
       </div>
-      <label class="toggle-switch">
-        <input type="checkbox" id="toggle-connection" />
-        <span class="slider"></span>
-      </label>
-    </div>
 
-    <!-- Divider -->
-    <div class="divider"></div>
-
-    <!-- Server List -->
-    <div class="server-section">
-      <div class="section-title">服务器线路</div>
-      <div class="server-list" id="server-list">
-        <!-- populated by JS -->
+      <!-- Status Header -->
+      <div class="status-header" data-wails-drag>
+        <div class="status-dot" id="status-dot"></div>
+        <div class="status-text">
+          <div class="status-label" id="status-label">已断开</div>
+          <div class="status-latency" id="status-latency">--</div>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="toggle-connection" />
+          <span class="slider"></span>
+        </label>
       </div>
-    </div>
 
-    <!-- Divider -->
-    <div class="divider"></div>
+      <!-- Divider -->
+      <div class="divider"></div>
 
-    <!-- Actions -->
-    <div class="actions">
-      <button class="action-btn" id="btn-edit">编辑配置</button>
-      <button class="action-btn" id="btn-reload">重新加载</button>
+      <!-- Server List -->
+      <div class="server-section">
+        <div class="section-title">服务器线路</div>
+        <div class="server-list" id="server-list">
+          <!-- populated by JS -->
+        </div>
+      </div>
+
+      <!-- Divider -->
+      <div class="divider"></div>
+
+      <!-- Actions -->
+      <div class="actions">
+        <button class="action-btn" id="btn-edit">编辑配置</button>
+        <button class="action-btn" id="btn-reload">重新加载</button>
+      </div>
     </div>
   </div>
 
