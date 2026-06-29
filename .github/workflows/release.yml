@@ -58,7 +58,7 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           cd cmd/sdwan
-          go build -ldflags="-s -w" -o "../../dist/sdwan-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}" .
+          go build -ldflags="-s -w -X 'main.Version=${{ github.ref_name }}' -X 'main.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%S%z')'" -o "../../dist/sdwan-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}" .
           cd ../..
 
       - name: Upload artifact
