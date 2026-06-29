@@ -27,7 +27,8 @@ body {
   overflow: hidden;
   background: #ffffff;
   border: 1px solid #d9dde4;
-  border-radius: 12px;
+  border-radius: 0;
+  box-shadow: 0 6px 18px rgba(31, 41, 55, 0.14);
 }
 
 #panel {
