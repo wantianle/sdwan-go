@@ -1,18 +1,9 @@
 #Requires -RunAsAdministrator
 
-# Force UTF-8 encoding for Chinese output (PowerShell console defaults to GBK)
-$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-[Console]::InputEncoding  = [System.Text.Encoding]::UTF8
+# Force UTF-8 code page before anything else (Chinese Windows defaults to GBK)
+chcp 65001 >$null 2>&1
 
-# ────────────────────────────────────────────────────────────
-# sdwan Windows installer — download binaries from GitHub,
-# setup deployment directory, optional auto-start.
-#
-# One-liner (admin PowerShell):
-#   iwr -useb https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.ps1 | iex
-# ────────────────────────────────────────────────────────────
-
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $REPO_OWNER = "wantianle"
 $REPO_NAME  = "sdwan-go"
 $REPO_BRANCH = "master"
