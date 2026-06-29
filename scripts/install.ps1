@@ -1,5 +1,9 @@
 #Requires -RunAsAdministrator
 
+# Force UTF-8 encoding for Chinese output (PowerShell console defaults to GBK)
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding  = [System.Text.Encoding]::UTF8
+
 # ────────────────────────────────────────────────────────────
 # sdwan Windows installer — download binaries from GitHub,
 # setup deployment directory, optional auto-start.
@@ -63,15 +67,34 @@ Write-Host "[2/5] 下载组件..."
 # Each file tries raw dist first, then GitHub Release as fallback
 $coreUrls  = @("$baseUrl/sdwan-windows-amd64.exe", "$releaseUrl/sdwan-windows-amd64.exe")
 $panelUrls = @("$baseUrl/sdwan-panel.exe", "$releaseUrl/sdwan-panel.exe")
-$wintunUrls = @("$baseUrl/wintun.dll", "$releaseUrl/wintun.dll")
+$wintunUrls = @(
+    "$baseUrl/wintun.dll",
+    "$releaseUrl/wintun.dll",
+    "https://www.wintun.net/builds/wintun-0.14.1.zip"
+)
 
 Download-File -Urls $coreUrls  -Dest "$INSTALL_DIR\sdwan-windows-amd64.exe"
 Download-File -Urls $panelUrls -Dest "$INSTALL_DIR\sdwan-panel.exe"
 
+# wintun.dll: bundled in dist/, or downloaded from wintun.net (zip → extract)
 try {
-    Download-File -Urls $wintunUrls -Dest "$INSTALL_DIR\wintun.dll"
+    if (Test-Path "$INSTALL_DIR\wintun.dll") {
+        Write-Host "  wintun.dll 已存在，跳过" -ForegroundColor Green
+    } else {
+        Download-File -Urls $wintunUrls -Dest "$env:TEMP\wintun.zip"
+        $extractDir = "$env:TEMP\wintun_extract"
+        Expand-Archive -Path "$env:TEMP\wintun.zip" -DestinationPath $extractDir -Force
+        $dll = Get-ChildItem -Path $extractDir -Recurse -Filter "wintun.dll" | Where-Object { $_.Directory.Name -eq "amd64" } | Select-Object -First 1
+        if ($dll) {
+            Copy-Item $dll.FullName "$INSTALL_DIR\wintun.dll"
+            Write-Host "  下载: wintun.dll ... OK (官方)" -ForegroundColor Green
+        } else {
+            throw "未在 zip 中找到 wintun.dll"
+        }
+        Remove-Item "$env:TEMP\wintun.zip", $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 } catch {
-    Write-Host "  提示: wintun.dll 未找到，请手动从 https://www.wintun.net/ 下载放入 $INSTALL_DIR" -ForegroundColor Yellow
+    Write-Host "  提示: wintun.dll 下载失败，请手动从 https://www.wintun.net/ 下载放入 $INSTALL_DIR" -ForegroundColor Yellow
 }
 
 # ────────────────────────────────────────────────────────────
