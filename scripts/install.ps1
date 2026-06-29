@@ -268,29 +268,6 @@ function Get-TcpLatencyMs {
     }
 }
 
-function Get-ServerLatencyMs {
-    param([string]$Server)
-
-    $tcp443 = Get-TcpLatencyMs -Server $Server -Port 443 -TimeoutMs 2000
-    if ($tcp443 -gt 0) {
-        return $tcp443
-    }
-
-    $tcp10010 = Get-TcpLatencyMs -Server $Server -Port 10010 -TimeoutMs 2000
-    if ($tcp10010 -gt 0) {
-        return $tcp10010
-    }
-
-    try {
-        $ping = Test-Connection -ComputerName $Server -Count 1 -TimeoutSeconds 2 -ErrorAction SilentlyContinue
-        if ($ping) {
-            return [Math]::Max(1, [int]$ping.ResponseTime)
-        }
-    } catch {}
-
-    return -1
-}
-
 if (-not $useExistingConfig) {
     Write-Host ""
     Write-Host "[3/5] Server selection (checking latency...)" -ForegroundColor Cyan
@@ -300,7 +277,7 @@ if (-not $useExistingConfig) {
         $lat = "timeout/unreachable"
         $latColor = "DarkGray"
         try {
-            $ms = Get-ServerLatencyMs -Server $s.Name
+            $ms = Get-TcpLatencyMs -Server $s.Name -Port 443 -TimeoutMs 2000
             if ($ms -gt 0) {
                 $lat = "${ms}ms"
                 if ($ms -lt 20) {
