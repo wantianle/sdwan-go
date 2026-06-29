@@ -139,7 +139,7 @@ download_binary() {
     local total=${#urls[@]}
     local i=0
     for entry in "${urls[@]}"; do
-        ((i++))
+        ((i++)) || true
         local url="${entry% (*}"
         local label="${entry##*(}"
         label="${label%)}"
