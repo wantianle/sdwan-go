@@ -11,7 +11,7 @@
 $ErrorActionPreference = "Stop"
 $REPO_OWNER = "wantianle"
 $REPO_NAME  = "sdwan-go"
-$REPO_BRANCH = "main"
+$REPO_BRANCH = "master"
 $INSTALL_DIR = "C:\ProgramData\sdwan"
 
 Write-Host "" -ForegroundColor Cyan
@@ -32,22 +32,25 @@ Write-Host "[1/5] 安装目录: $INSTALL_DIR" -ForegroundColor Green
 # 2. Download binaries from GitHub
 # ────────────────────────────────────────────────────────────
 function Download-File {
-    param($Url, $Dest)
-    Write-Host "  下载: $(Split-Path $Dest -Leaf) ... " -NoNewline
-    try {
-        $ProgressPreference = 'SilentlyContinue'
-        # Try proxy first, then direct
-        Invoke-WebRequest -Uri "https://ghproxy.com/$Url" -OutFile $Dest -UseBasicParsing -ErrorAction Stop
-        Write-Host "OK (proxy)" -ForegroundColor Green
-    } catch {
+    param($Urls)
+    Write-Host "  下载: $(Split-Path $Urls[0] -Leaf) ... " -NoNewline
+    $ProgressPreference = 'SilentlyContinue'
+    foreach ($url in $Urls) {
         try {
-            Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -ErrorAction Stop
+            # Try proxy first
+            Invoke-WebRequest -Uri "https://ghproxy.com/$url" -OutFile $Dest -UseBasicParsing -ErrorAction Stop
+            Write-Host "OK (proxy)" -ForegroundColor Green
+            return
+        } catch {}
+        try {
+            # Try direct
+            Invoke-WebRequest -Uri $url -OutFile $Dest -UseBasicParsing -ErrorAction Stop
             Write-Host "OK" -ForegroundColor Green
-        } catch {
-            Write-Host "FAILED" -ForegroundColor Red
-            throw "Download failed: $Url"
-        }
+            return
+        } catch {}
     }
+    Write-Host "FAILED" -ForegroundColor Red
+    throw "Download failed"
 }
 
 $baseUrl = "https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/$REPO_BRANCH/dist"
@@ -55,17 +58,16 @@ $releaseUrl = "https://github.com/$REPO_OWNER/$REPO_NAME/releases/latest/downloa
 
 Write-Host "[2/5] 下载组件..."
 
-# Try releases first, fall back to raw dist/
-$coreUrl = "$baseUrl/sdwan-windows-amd64.exe"
-$panelUrl = "$baseUrl/sdwan-panel.exe"
-$wintunUrl = "$baseUrl/wintun.dll"
+# Each file tries raw dist first, then GitHub Release as fallback
+$coreUrls  = @("$baseUrl/sdwan-windows-amd64.exe", "$releaseUrl/sdwan-windows-amd64.exe")
+$panelUrls = @("$baseUrl/sdwan-panel.exe", "$releaseUrl/sdwan-panel.exe")
+$wintunUrls = @("$baseUrl/wintun.dll", "$releaseUrl/wintun.dll")
 
-Download-File -Url $coreUrl -Dest "$INSTALL_DIR\sdwan-windows-amd64.exe"
-Download-File -Url $panelUrl -Dest "$INSTALL_DIR\sdwan-panel.exe"
+Download-File -Urls $coreUrls  -Dest "$INSTALL_DIR\sdwan-windows-amd64.exe"
+Download-File -Urls $panelUrls -Dest "$INSTALL_DIR\sdwan-panel.exe"
 
-# wintun.dll: bundled in dist/ or downloaded from wintun.net
 try {
-    Download-File -Url $wintunUrl -Dest "$INSTALL_DIR\wintun.dll"
+    Download-File -Urls $wintunUrls -Dest "$INSTALL_DIR\wintun.dll"
 } catch {
     Write-Host "  提示: wintun.dll 未找到，请手动从 https://www.wintun.net/ 下载放入 $INSTALL_DIR" -ForegroundColor Yellow
 }
