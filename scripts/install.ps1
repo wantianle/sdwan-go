@@ -201,6 +201,7 @@ try {
 # ────────────────────────────────────────────────────────────
 $configPath = "$INSTALL_DIR\iwan.conf"
 $useExistingConfig = $false
+$selectedServer = "minieye.9966.org"
 
 if (Test-Path $configPath) {
     Write-Host ""
@@ -229,81 +230,10 @@ if (Test-Path $configPath) {
     }
 }
 
-$servers = @(
-    @{Name="minieye.9966.org"; Desc="Telecom dedicated 1000M (recommended)"},
-    @{Name="dwan.minieye.tech"; Desc="Telecom broadband 3x100M"},
-    @{Name="minieye.8866.org"; Desc="China Mobile dedicated 500M"},
-    @{Name="minieye.2288.org"; Desc="China Unicom broadband 200M"},
-    @{Name="youjia.8866.org"; Desc="Telecom dedicated 50M (finance)"}
-)
-
-function Get-TcpLatencyMs {
-    param(
-        [string]$Server,
-        [int]$Port = 443,
-        [int]$TimeoutMs = 2000
-    )
-
-    $client = New-Object System.Net.Sockets.TcpClient
-    $watch = [System.Diagnostics.Stopwatch]::StartNew()
-
-    try {
-        $async = $client.BeginConnect($Server, $Port, $null, $null)
-        try {
-            if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
-                return -1
-            }
-
-            $client.EndConnect($async)
-        } finally {
-            $async.AsyncWaitHandle.Close()
-        }
-        $watch.Stop()
-        return [Math]::Max(1, [int]$watch.ElapsedMilliseconds)
-    } catch {
-        return -1
-    } finally {
-        if ($watch.IsRunning) { $watch.Stop() }
-        $client.Close()
-    }
-}
-
 if (-not $useExistingConfig) {
     Write-Host ""
-    Write-Host "[3/5] Server selection (checking latency...)" -ForegroundColor Cyan
-
-    for ($i=0; $i -lt $servers.Count; $i++) {
-        $s = $servers[$i]
-        $lat = "timeout/unreachable"
-        $latColor = "DarkGray"
-        try {
-            $ms = Get-TcpLatencyMs -Server $s.Name -Port 443 -TimeoutMs 2000
-            if ($ms -gt 0) {
-                $lat = "${ms}ms"
-                if ($ms -lt 20) {
-                    $latColor = "Green"
-                } elseif ($ms -le 80) {
-                    $latColor = "Yellow"
-                } else {
-                    $latColor = "Red"
-                }
-            }
-        } catch {
-            $latColor = "DarkGray"
-        }
-        $mark = if ($i -eq 0) { " [default]" } else { "" }
-        Write-Host "  [$($i+1)] $($s.Name) - $($s.Desc)  " -NoNewline
-        Write-Host $lat -ForegroundColor $latColor -NoNewline
-        Write-Host $mark
-    }
-
-    $choice = Read-Host "`nSelect server (Enter = 1)"
-    $idx = 0
-    if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le 5) {
-        $idx = [int]$choice - 1
-    }
-    $selectedServer = $servers[$idx].Name
-    Write-Host "  Selected: $selectedServer" -ForegroundColor Green
+    Write-Host "[3/5] Server selection" -ForegroundColor Cyan
+    Write-Host "  Default server: $selectedServer" -ForegroundColor Green
 }
 
 # ────────────────────────────────────────────────────────────

@@ -604,7 +604,13 @@ func (m *SdwanManager) probeOnce() {
 			defer wg.Done()
 			lat := probeLatency(sname)
 			m.mu.Lock()
-			m.serverLatency[sid] = lat
+			if lat > 0 {
+				m.serverLatency[sid] = smoothLatency(m.serverLatency[sid], lat)
+			} else if existing := m.serverLatency[sid]; existing > 0 {
+				log.Printf("[LATENCY] %s probe failed, keeping last good latency %dms", sname, existing)
+			} else {
+				m.serverLatency[sid] = 0
+			}
 			m.mu.Unlock()
 		}(s.ID, s.Name)
 	}
@@ -613,7 +619,11 @@ func (m *SdwanManager) probeOnce() {
 	// Update current server latency for status header
 	m.mu.Lock()
 	if ms, ok := m.serverLatency[m.config.CurrentServer]; ok {
-		m.latency = ms
+		if ms > 0 {
+			m.latency = ms
+		} else {
+			m.latency = 0
+		}
 	} else {
 		m.latency = 0
 	}
@@ -636,6 +646,16 @@ func formatLatency(ms int64) string {
 		return "<1ms"
 	}
 	return fmt.Sprintf("%dms", ms)
+}
+
+func smoothLatency(previous, sample int64) int64 {
+	if sample <= 0 {
+		return previous
+	}
+	if previous <= 0 {
+		return sample
+	}
+	return (previous*7 + sample*3 + 5) / 10
 }
 
 type probeConfig struct {

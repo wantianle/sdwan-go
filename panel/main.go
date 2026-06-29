@@ -22,7 +22,6 @@ var appCtx context.Context
 const (
 	panelWidth  = 280
 	panelHeight = 380
-	panelMargin = 16
 )
 
 func main() {
@@ -45,7 +44,7 @@ func main() {
 
 	go safeSystray()
 
-	// Show-panel signal watcher — positions panel at bottom-right
+	// Show-panel signal watcher — positions panel at screen center
 	go func() {
 		for range trayShowCh {
 			log.Println("[DEBUG] Show panel signal received")
@@ -56,14 +55,8 @@ func main() {
 				if screens, err := wailsRuntime.ScreenGetAll(appCtx); err == nil {
 					for _, s := range screens {
 						if s.IsPrimary {
-							x := s.Size.Width - panelWidth - panelMargin
-							y := s.Size.Height - panelHeight - panelMargin - 48
-							if x < panelMargin {
-								x = panelMargin
-							}
-							if y < panelMargin {
-								y = panelMargin
-							}
+							x := (s.Size.Width - panelWidth) / 2
+							y := (s.Size.Height - panelHeight) / 2
 							wailsRuntime.WindowSetPosition(appCtx, x, y)
 							break
 						}
