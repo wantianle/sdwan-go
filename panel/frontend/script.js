@@ -128,7 +128,14 @@ function renderServerItem(s, latText) {
 
   item.addEventListener('click', () => {
     window.go.main.App.SelectServer(s.id).then(ok => {
-      if (ok) refreshServers();
+      if (ok) {
+        refreshStatus();
+        refreshServers();
+        setTimeout(() => {
+          refreshStatus();
+          refreshServers();
+        }, 800);
+      }
     });
   });
 

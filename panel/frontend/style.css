@@ -26,6 +26,8 @@ body {
   height: 100%;
   overflow: hidden;
   background: #ffffff;
+  border: 1px solid #d9dde4;
+  border-radius: 12px;
 }
 
 #panel {
@@ -36,9 +38,9 @@ body {
   gap: 12px;
   padding: 18px;
   overflow: hidden;
-  background: #ffffff;
-  border: 1px solid #d9dde4;
-  border-radius: 12px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
 }
 
 .panel-chrome {

@@ -49,17 +49,8 @@ func main() {
 		for range trayShowCh {
 			log.Println("[DEBUG] Show panel signal received")
 			if appCtx != nil {
-				if screens, err := wailsRuntime.ScreenGetAll(appCtx); err == nil {
-					for _, s := range screens {
-						if s.IsPrimary {
-							x := (s.Size.Width - panelWidth) / 2
-							y := (s.Size.Height - panelHeight) / 2
-							wailsRuntime.WindowSetPosition(appCtx, x, y)
-							break
-						}
-					}
-				}
 				wailsRuntime.WindowShow(appCtx)
+				wailsRuntime.WindowCenter(appCtx)
 				app.OnPanelShown() // resume probes + immediate refresh after visible
 			}
 		}
