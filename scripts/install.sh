@@ -49,8 +49,8 @@ detect_platform() {
 
 # ────────────────────────────────────────────────────────────
 select_server() {
-    echo ""
-    echo "---------- ⚡ SD-WAN 服务器延迟检测 ----------"
+    echo "" >&2
+    echo "---------- ⚡ SD-WAN 服务器延迟检测 ----------" >&2
     local nodes=(
         "1|电信专线 [1000M] (推荐)|minieye.9966.org"
         "2|电信普宽 [3×100M]|dwan.minieye.tech"
@@ -74,8 +74,8 @@ select_server() {
         fi
         cache="${cache}${id}) | ${desc} | ${B}${addr}${NC} | ${color}${display}ms${NC}\\n"
     done
-    echo -e "$cache" | column -t -s "|"
-    echo "----------------------------------------------"
+    echo -e "$cache" | column -t -s "|" >&2
+    echo "----------------------------------------------" >&2
 
     read -rp "选择服务器 (直接回车=1): " choice </dev/tty
     case $choice in
