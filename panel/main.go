@@ -30,7 +30,7 @@ func main() {
 
 	app := NewApp()
 
-	if f, err := os.Create("sdwan-panel.log"); err == nil {
+	if f, err := os.Create("panel.log"); err == nil {
 		log.SetOutput(f)
 		defer f.Close()
 	}

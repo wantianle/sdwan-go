@@ -22,7 +22,7 @@ windows:
 	cd $(BUILD_DIR) && GOOS=windows GOARCH=amd64 GOPROXY=$(GOPROXY) go build -ldflags "$(LDFLAGS)" -o ../../$(DST)/sdwan-windows-amd64.exe     .
 
 panel:
-	cd panel && GOPROXY=$(GOPROXY) go mod tidy && GOOS=windows GOARCH=amd64 go build -tags production -ldflags="-s -w -H windowsgui" -o ../dist/sdwan-panel.exe .
+	cd panel && GOPROXY=$(GOPROXY) go mod tidy && GOOS=windows GOARCH=amd64 go build -tags production -ldflags="-s -w -H windowsgui" -o ../dist/panel.exe .
 
 clean:
 	rm -f $(DST)/sdwan-*

@@ -13,7 +13,7 @@ $INSTALL_DIR = "C:\ProgramData\sdwan"
 Write-Host "🗑️  正在卸载 SDWAN..." -ForegroundColor Yellow
 
 # Kill running processes
-Get-Process -Name "sdwan-panel" | Stop-Process -Force
+Get-Process -Name "panel" | Stop-Process -Force
 Get-Process -Name "sdwan-windows-amd64" | Stop-Process -Force
 Write-Host "✅ 进程已终止" -ForegroundColor Green
 

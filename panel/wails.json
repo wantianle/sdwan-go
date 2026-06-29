@@ -1,6 +1,6 @@
 {
-  "name": "sdwan-panel",
-  "outputfilename": "sdwan-panel",
+  "name": "panel",
+  "outputfilename": "panel",
   "frontend:install": "",
   "frontend:build": "",
   "frontend:dev:watcher": "",
