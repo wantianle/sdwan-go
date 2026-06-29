@@ -32,25 +32,27 @@ Write-Host "[1/5] 安装目录: $INSTALL_DIR" -ForegroundColor Green
 # 2. Download binaries from GitHub
 # ────────────────────────────────────────────────────────────
 function Download-File {
-    param($Urls)
-    Write-Host "  下载: $(Split-Path $Urls[0] -Leaf) ... " -NoNewline
+    param($Urls, $Dest)
+    $name = Split-Path $Urls[0] -Leaf
+    Write-Host "  下载: $name ... " -NoNewline
     $ProgressPreference = 'SilentlyContinue'
     foreach ($url in $Urls) {
-        try {
-            # Try proxy first
-            Invoke-WebRequest -Uri "https://ghproxy.com/$url" -OutFile $Dest -UseBasicParsing -ErrorAction Stop
-            Write-Host "OK (proxy)" -ForegroundColor Green
-            return
-        } catch {}
-        try {
-            # Try direct
-            Invoke-WebRequest -Uri $url -OutFile $Dest -UseBasicParsing -ErrorAction Stop
-            Write-Host "OK" -ForegroundColor Green
-            return
-        } catch {}
+        # Try direct first (most reliable), then proxy
+        foreach ($try in @($url, "https://ghproxy.com/$url")) {
+            try {
+                Invoke-WebRequest -Uri $try -OutFile $Dest -UseBasicParsing -ErrorAction Stop
+                $tag = if ($try -match 'ghproxy') { 'proxy' } else { 'direct' }
+                Write-Host "OK ($tag)" -ForegroundColor Green
+                return
+            } catch {
+                $msg = $_.Exception.Message
+                if ($msg.Length -gt 80) { $msg = $msg.Substring(0, 80) + "..." }
+                Write-Host "`n    ⚠ $try → $msg" -ForegroundColor Yellow
+            }
+        }
     }
-    Write-Host "FAILED" -ForegroundColor Red
-    throw "Download failed"
+    Write-Host "FAILED (tried $($Urls.Count) sources)" -ForegroundColor Red
+    throw "Download failed: $name"
 }
 
 $baseUrl = "https://raw.githubusercontent.com/$REPO_OWNER/$REPO_NAME/$REPO_BRANCH/dist"
