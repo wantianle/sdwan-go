@@ -64,7 +64,7 @@ select_server() {
         IFS="|" read -r id desc addr <<< "$node"
         local lat
         lat=$(ping -c 2 -W 2 "$addr" 2>/dev/null | awk -F '/' 'END {printf "%.0f", $5}')
-        local display color="$G"
+        local display="$lat" color="$G"
         if [[ -z "$lat" ]]; then
             display="超时"; color="$R"
         elif (( lat > 300 )); then
