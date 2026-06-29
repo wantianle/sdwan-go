@@ -8,6 +8,9 @@ on:
     branches: [master]
   workflow_dispatch:
 
+permissions:
+  contents: write   # needed by action-gh-release to create releases
+
 jobs:
   # ─── CI: vet + test on every push ───────────────────────────
   test:
