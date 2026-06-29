@@ -2,7 +2,10 @@ package core
 
 import (
 	"bufio"
+	"crypto/aes"
+	"crypto/md5"
 	"encoding/json"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -10,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -634,19 +638,204 @@ func formatLatency(ms int64) string {
 	return fmt.Sprintf("%dms", ms)
 }
 
-// probeLatency uses TCP dial to port 443 to measure real RTT.
-// TCP handshake gives authentic round-trip time — no output parsing needed.
+type probeConfig struct {
+	Server   string
+	Username string
+	Password string
+	Port     int
+	MTU      int
+	Encrypt  int
+}
+
+const (
+	probeMsgOPENACK byte = 0x12
+	probeMsgOPEN    byte = 0x13
+)
+
+// probeLatency sends the SD-WAN OPEN handshake over UDP:10010 and measures
+// the time until a valid OPENACK arrives.
 func probeLatency(server string) int64 {
-	start := time.Now()
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(server, "443"), 2*time.Second)
-	if err != nil {
-		log.Printf("[LATENCY] %s:443 unreachable: %v", server, err)
+	cfg := loadProbeConfig(server)
+	if cfg.Username == "" || cfg.Password == "" {
+		log.Printf("[LATENCY] %s probe skipped: missing username/password in iwan.conf", server)
 		return -1
 	}
-	conn.Close()
-	ms := time.Since(start).Milliseconds()
-	log.Printf("[LATENCY] %s:443 = %dms", server, ms)
-	return ms
+
+	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(cfg.Server, strconv.Itoa(cfg.Port)))
+	if err != nil {
+		log.Printf("[LATENCY] %s:%d resolve failed: %v", cfg.Server, cfg.Port, err)
+		return -1
+	}
+
+	conn, err := net.DialUDP("udp", nil, addr)
+	if err != nil {
+		log.Printf("[LATENCY] %s:%d dial failed: %v", cfg.Server, cfg.Port, err)
+		return -1
+	}
+	defer conn.Close()
+
+	openPkt := buildProbeOpenPacket(cfg)
+	buf := make([]byte, 2048)
+	start := time.Now()
+	if _, err := conn.Write(openPkt); err != nil {
+		log.Printf("[LATENCY] %s:%d send OPEN failed: %v", cfg.Server, cfg.Port, err)
+		return -1
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			log.Printf("[LATENCY] %s:%d OPENACK timeout/unreachable: %v", cfg.Server, cfg.Port, err)
+			return -1
+		}
+		data := buf[:n]
+		if len(data) < 24 {
+			continue
+		}
+		if probeMsgType(data) != probeMsgOPENACK {
+			continue
+		}
+		if !probePktVerify(data) {
+			continue
+		}
+		ms := time.Since(start).Milliseconds()
+		log.Printf("[LATENCY] %s:%d OPEN/OPENACK = %dms", cfg.Server, cfg.Port, ms)
+		return ms
+	}
+}
+
+func loadProbeConfig(server string) probeConfig {
+	cfg := probeConfig{
+		Server:  server,
+		Port:    10010,
+		MTU:     1436,
+		Encrypt: 0,
+	}
+
+	f, err := os.Open(instance.iwanPath)
+	if err != nil {
+		return cfg
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		switch key {
+		case "server":
+			if cfg.Server == "" {
+				cfg.Server = val
+			}
+		case "username":
+			cfg.Username = val
+		case "password":
+			cfg.Password = val
+		case "port":
+			if v, err := strconv.Atoi(val); err == nil && v > 0 {
+				cfg.Port = v
+			}
+		case "mtu":
+			if v, err := strconv.Atoi(val); err == nil && v > 0 {
+				cfg.MTU = v
+			}
+		case "encrypt":
+			if v, err := strconv.Atoi(val); err == nil {
+				cfg.Encrypt = v
+			}
+		}
+	}
+	return cfg
+}
+
+func probePktSign(header []byte) []byte {
+	h := md5.New()
+	_, _ = h.Write(header[:8])
+	_, _ = h.Write([]byte("mw"))
+	return h.Sum(nil)
+}
+
+func probePktSignInPlace(header []byte) {
+	copy(header[8:24], probePktSign(header))
+}
+
+func probePktVerify(header []byte) bool {
+	expected := probePktSign(header)
+	for i := 0; i < 16; i++ {
+		if header[8+i] != expected[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func probeEncryptPassword(username, password string) []byte {
+	h := md5.New()
+	_, _ = h.Write([]byte("mw"))
+	_, _ = h.Write([]byte(username))
+	aesKey := h.Sum(nil)
+
+	block := make([]byte, 16)
+	copy(block, password)
+	cipher, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return block
+	}
+	cipher.Encrypt(block, block)
+	return block
+}
+
+func buildProbeOpenPacket(cfg probeConfig) []byte {
+	buf := make([]byte, 1024)
+	pos := 0
+
+	buf[pos] = probeMsgOPEN
+	buf[pos+1] = byte(cfg.Encrypt)
+	pos += 8
+	pos += 16
+
+	buf[pos] = 0x03
+	buf[pos+1] = 0x04
+	binary.BigEndian.PutUint16(buf[pos+2:pos+4], uint16(cfg.MTU))
+	pos += 4
+
+	buf[pos] = 0x01
+	buf[pos+1] = byte(len(cfg.Username) + 2)
+	copy(buf[pos+2:], cfg.Username)
+	pos += 2 + len(cfg.Username)
+
+	encPW := probeEncryptPassword(cfg.Username, cfg.Password)
+	buf[pos] = 0x02
+	buf[pos+1] = 0x12
+	copy(buf[pos+2:], encPW)
+	pos += 18
+
+	if cfg.Encrypt != 0 {
+		buf[pos] = 0x08
+		buf[pos+1] = 0x03
+		buf[pos+2] = byte(cfg.Encrypt)
+		pos += 3
+	}
+
+	pkt := buf[:pos]
+	probePktSignInPlace(pkt[:24])
+	return pkt
+}
+
+func probeMsgType(data []byte) byte {
+	if len(data) == 0 {
+		return 0
+	}
+	return data[0]
 }
 
 // --- iwan.conf file watcher ------------------------------------------
