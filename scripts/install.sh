@@ -12,7 +12,7 @@ set -euo pipefail
 REPO_OWNER="wantianle"
 REPO_NAME="sdwan-go"
 REPO_BRANCH="master"
-GH_PROXIES=("https://ghproxy.com/" "https://ghproxy.net/" "https://gh-proxy.com/")  # GitHub mirrors, tried in order
+GH_PROXIES=("https://gh-proxy.com/" "https://gh.ddlc.top/" "https://gh.idayer.com/")  # GitHub mirrors (verified working 2025-06-29)
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/sdwan"
 CONFIG_FILE="$CONFIG_DIR/iwan.conf"

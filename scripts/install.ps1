@@ -8,7 +8,7 @@ $REPO_OWNER = "wantianle"
 $REPO_NAME  = "sdwan-go"
 $REPO_BRANCH = "master"
 $INSTALL_DIR = "C:\ProgramData\sdwan"
-$GH_PROXIES = @("https://ghproxy.com/", "https://ghproxy.net/", "https://gh-proxy.com/")  # GitHub mirrors, tried in order
+$GH_PROXIES = @("https://gh-proxy.com/", "https://gh.ddlc.top/", "https://gh.idayer.com/")  # GitHub mirrors (verified working 2025-06-29)
 
 Write-Host "" -ForegroundColor Cyan
 Write-Host "═══════════════════════════════════════════" -ForegroundColor Cyan
