@@ -61,7 +61,7 @@ func TestCheckTunnelCompatibleOk(t *testing.T) {
 	}
 }
 
-func TestCheckTunnelCompatibleDifferentLocalIP(t *testing.T) {
+func TestCheckTunnelCompatibleAllowsDifferentLocalIP(t *testing.T) {
 	cfg := &Config{MTU: 1436, Encrypt: 0}
 	c, _ := NewClient(cfg)
 	c.SetTunnelConfig(&OPENACKResult{
@@ -73,12 +73,12 @@ func TestCheckTunnelCompatibleDifferentLocalIP(t *testing.T) {
 		LocalIP:   "10.0.0.99",
 		GatewayIP: "10.0.0.1",
 	})
-	if err == nil {
-		t.Fatal("expected incompatible, got nil")
+	if err != nil {
+		t.Fatalf("expected LocalIP change to be allowed, got %v", err)
 	}
 }
 
-func TestCheckTunnelCompatibleDifferentGateway(t *testing.T) {
+func TestCheckTunnelCompatibleAllowsDifferentGateway(t *testing.T) {
 	cfg := &Config{MTU: 1436, Encrypt: 0}
 	c, _ := NewClient(cfg)
 	c.SetTunnelConfig(&OPENACKResult{
@@ -90,8 +90,8 @@ func TestCheckTunnelCompatibleDifferentGateway(t *testing.T) {
 		LocalIP:   "10.0.0.2",
 		GatewayIP: "10.0.0.254",
 	})
-	if err == nil {
-		t.Fatal("expected incompatible, got nil")
+	if err != nil {
+		t.Fatalf("expected GatewayIP change to be allowed, got %v", err)
 	}
 }
 

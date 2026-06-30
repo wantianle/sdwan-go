@@ -110,18 +110,14 @@ func cloneConfig(cfg *Config) *Config {
 	return &cpy
 }
 
-// checkTunnelCompatible returns an error if the new OPENACKResult would
-// require TUN reconfiguration (different IPs or a conflicting MTU).
+// checkTunnelCompatible returns an error if the new OPENACKResult requires an
+// unsupported reconfiguration. Server-assigned LocalIP/GatewayIP changes are
+// allowed and applied in-place by applyTunnelConfig; MTU changes are still
+// rejected for now because MTU reconfiguration is separate.
 func (c *Client) checkTunnelCompatible(newCfg *OPENACKResult) error {
 	old := c.currentTunConfig()
 	if old == nil {
 		return fmt.Errorf("no baseline tunnel config: call SetTunnelConfig first")
-	}
-	if newCfg.LocalIP != old.LocalIP {
-		return fmt.Errorf("incompatible LocalIP: new=%s old=%s", newCfg.LocalIP, old.LocalIP)
-	}
-	if newCfg.GatewayIP != old.GatewayIP {
-		return fmt.Errorf("incompatible GatewayIP: new=%s old=%s", newCfg.GatewayIP, old.GatewayIP)
 	}
 	if newCfg.MTU > 0 {
 		cfg := c.currentConfig()
@@ -129,6 +125,38 @@ func (c *Client) checkTunnelCompatible(newCfg *OPENACKResult) error {
 			return fmt.Errorf("MTU mismatch: new=%d current=%d", newCfg.MTU, cfg.MTU)
 		}
 	}
+	return nil
+}
+
+// applyTunnelConfig applies server-assigned tunnel IP changes to the existing
+// TUN adapter before publishing a new session. It never closes/recreates TUN
+// and does not touch routes; existing routes are interface-based.
+func (c *Client) applyTunnelConfig(tunCfg *OPENACKResult, cfg *Config) error {
+	if tunCfg == nil {
+		return fmt.Errorf("nil tunnel config")
+	}
+	old := c.currentTunConfig()
+	if old == nil {
+		return fmt.Errorf("no baseline tunnel config: call SetTunnelConfig first")
+	}
+	if tunCfg.LocalIP == old.LocalIP && tunCfg.GatewayIP == old.GatewayIP {
+		return nil
+	}
+	if c.TUN == nil {
+		return fmt.Errorf("cannot reconfigure tunnel IP: TUN is nil")
+	}
+
+	localCIDR := tunCfg.LocalIP + "/24"
+	log.Printf("[SWITCH] Reconfiguring TUN %s IP %s/%s -> %s/%s",
+		c.TUN.Name(), old.LocalIP, old.GatewayIP, tunCfg.LocalIP, tunCfg.GatewayIP)
+	if err := SetTUNIP(c.TUN.Name(), localCIDR, tunCfg.GatewayIP); err != nil {
+		return fmt.Errorf("set switched TUN IP: %w", err)
+	}
+
+	c.mu.Lock()
+	c.tunConfig = tunCfg
+	c.mu.Unlock()
+	_ = cfg // kept for future MTU/address reconfiguration without changing signature
 	return nil
 }
 
@@ -591,6 +619,10 @@ func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
 	if err := c.checkTunnelCompatible(tunCfg); err != nil {
 		newS.Close()
 		return nil, fmt.Errorf("switch: incompatible: %w", err)
+	}
+	if err := c.applyTunnelConfig(tunCfg, nextCfg); err != nil {
+		newS.Close()
+		return nil, fmt.Errorf("switch: tunnel reconfig: %w", err)
 	}
 
 	// Override config MTU before publishing nextCfg so readers never observe

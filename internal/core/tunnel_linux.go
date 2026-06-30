@@ -34,6 +34,10 @@ func CreateTUN(name string, mtu int, _ string) (*water.Interface, error) {
 // SetTUNIP assigns an IP address (CIDR format, e.g. "10.100.100.7/24")
 // and brings the TUN interface up.
 func SetTUNIP(name, ip, gateway string) error {
+	// Replacement-friendly: switch can reassign a new server-provided tunnel IP
+	// on the same TUN. Ignore flush errors; there may be no address yet.
+	_ = exec.Command("ip", "addr", "flush", "dev", name).Run()
+
 	err := exec.Command("ip", "addr", "add", ip, "dev", name).Run()
 	if err != nil {
 		return fmt.Errorf("set IP on %s: %w", name, err)
