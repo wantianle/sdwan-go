@@ -43,7 +43,8 @@ type Client struct {
 	stopCh         chan struct{}
 	stopped        bool
 	closeOnce      sync.Once
-	packetPumpOnce sync.Once // ensures tunToServer goroutine is launched once
+	packetPumpOnce sync.Once  // ensures tunToServer goroutine is launched once
+	switchMu       sync.Mutex // serializes SwitchServer calls
 }
 
 // NewClient creates a new SDWAN client
@@ -559,6 +560,11 @@ func connectAndHandshakeSession(cfg *Config) (*Session, []byte, error) {
 // returned. On failure the new session is closed and an error is returned;
 // the existing session is left untouched.
 func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
+	if !c.switchMu.TryLock() {
+		return nil, fmt.Errorf("switch already in progress")
+	}
+	defer c.switchMu.Unlock()
+
 	// a) clone + validate
 	nextCfg := cloneConfig(next)
 	if nextCfg == nil {

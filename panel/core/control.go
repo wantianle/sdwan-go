@@ -98,11 +98,14 @@ func isAuthError(err error) bool {
 
 // --- HTTP control client ---
 
-const controlTimeout = 2 * time.Second
+const (
+	controlTimeoutStatus = 2 * time.Second
+	controlTimeoutAction = 15 * time.Second
+)
 
 func getControlStatus(addr, token string) (*controlStatusResult, error) {
 	url := "http://" + addr + "/v1/status"
-	body, err := controlRequest(http.MethodGet, url, token, nil)
+	body, err := controlRequest(http.MethodGet, url, token, nil, controlTimeoutStatus)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +119,7 @@ func getControlStatus(addr, token string) (*controlStatusResult, error) {
 func postControlSwitch(addr, token, server string) (*controlSwitchResponse, error) {
 	url := "http://" + addr + "/v1/switch"
 	reqBody, _ := json.Marshal(map[string]string{"server": server})
-	body, err := controlRequest(http.MethodPost, url, token, bytes.NewReader(reqBody))
+	body, err := controlRequest(http.MethodPost, url, token, bytes.NewReader(reqBody), controlTimeoutAction)
 	if err != nil {
 		return nil, err
 	}
@@ -130,12 +133,12 @@ func postControlSwitch(addr, token, server string) (*controlSwitchResponse, erro
 // postControlShutdown sends a graceful shutdown request to the daemon.
 func postControlShutdown(addr, token string) error {
 	url := "http://" + addr + "/v1/shutdown"
-	_, err := controlRequest(http.MethodPost, url, token, nil)
+	_, err := controlRequest(http.MethodPost, url, token, nil, controlTimeoutAction)
 	return err
 }
 
-func controlRequest(method, url, token string, body io.Reader) ([]byte, error) {
-	client := &http.Client{Timeout: controlTimeout}
+func controlRequest(method, url, token string, body io.Reader, timeout time.Duration) ([]byte, error) {
+	client := &http.Client{Timeout: timeout}
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
