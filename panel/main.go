@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"runtime/debug"
+	"time"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -49,9 +50,11 @@ func main() {
 		for range trayShowCh {
 			log.Println("[DEBUG] Show panel signal received")
 			if appCtx != nil {
+				log.Println("[DEBUG] Tray show: WindowShow + WindowCenter")
 				wailsRuntime.WindowShow(appCtx)
 				wailsRuntime.WindowCenter(appCtx)
 				app.OnPanelShown() // resume probes + immediate refresh after visible
+				log.Println("[DEBUG] Tray show: OnPanelShown complete")
 			}
 		}
 	}()
@@ -84,6 +87,14 @@ func main() {
 		},
 		OnDomReady: func(ctx context.Context) {
 			log.Println("[DEBUG] OnDomReady called — frontend loaded")
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+				log.Println("[DEBUG] Auto showing panel on first DOM ready")
+				wailsRuntime.WindowShow(ctx)
+				wailsRuntime.WindowCenter(ctx)
+				app.OnPanelShown()
+				log.Println("[DEBUG] Auto show: OnPanelShown complete")
+			}()
 		},
 		OnShutdown: func(ctx context.Context) {
 			log.Println("[DEBUG] OnShutdown called")

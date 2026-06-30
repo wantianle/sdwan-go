@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"log"
 	"os"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -26,6 +27,8 @@ var trayShowCh = make(chan struct{}, 1)
 // shutdownCh signals the Wails app to gracefully shut down.
 var shutdownCh = make(chan struct{})
 
+var shutdownOnce sync.Once
+
 const (
 	WM_USER          = 0x0400
 	WM_TRAYICON      = WM_USER + 1
@@ -37,24 +40,24 @@ const (
 )
 
 var (
-	user32                 = windows.NewLazySystemDLL("user32.dll")
-	shell32                = windows.NewLazySystemDLL("shell32.dll")
-	procRegisterClassExW   = user32.NewProc("RegisterClassExW")
-	procCreateWindowExW    = user32.NewProc("CreateWindowExW")
-	procDefWindowProcW     = user32.NewProc("DefWindowProcW")
-	procGetMessageW        = user32.NewProc("GetMessageW")
-	procTranslateMessage   = user32.NewProc("TranslateMessage")
-	procDispatchMessageW   = user32.NewProc("DispatchMessageW")
-	procDestroyWindow      = user32.NewProc("DestroyWindow")
-	procPostQuitMessage    = user32.NewProc("PostQuitMessage")
-	procShellNotifyIconW   = shell32.NewProc("Shell_NotifyIconW")
-	procLoadImageW         = user32.NewProc("LoadImageW")
-	procDestroyIcon        = user32.NewProc("DestroyIcon")
+	user32                  = windows.NewLazySystemDLL("user32.dll")
+	shell32                 = windows.NewLazySystemDLL("shell32.dll")
+	procRegisterClassExW    = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW     = user32.NewProc("CreateWindowExW")
+	procDefWindowProcW      = user32.NewProc("DefWindowProcW")
+	procGetMessageW         = user32.NewProc("GetMessageW")
+	procTranslateMessage    = user32.NewProc("TranslateMessage")
+	procDispatchMessageW    = user32.NewProc("DispatchMessageW")
+	procDestroyWindow       = user32.NewProc("DestroyWindow")
+	procPostQuitMessage     = user32.NewProc("PostQuitMessage")
+	procShellNotifyIconW    = shell32.NewProc("Shell_NotifyIconW")
+	procLoadImageW          = user32.NewProc("LoadImageW")
+	procDestroyIcon         = user32.NewProc("DestroyIcon")
 	procSetForegroundWindow = user32.NewProc("SetForegroundWindow")
-	procCreatePopupMenu    = user32.NewProc("CreatePopupMenu")
-	procAppendMenuW        = user32.NewProc("AppendMenuW")
-	procTrackPopupMenu     = user32.NewProc("TrackPopupMenu")
-	procGetCursorPos       = user32.NewProc("GetCursorPos")
+	procCreatePopupMenu     = user32.NewProc("CreatePopupMenu")
+	procAppendMenuW         = user32.NewProc("AppendMenuW")
+	procTrackPopupMenu      = user32.NewProc("TrackPopupMenu")
+	procGetCursorPos        = user32.NewProc("GetCursorPos")
 )
 
 type WNDCLASSEXW struct {
@@ -75,21 +78,21 @@ type WNDCLASSEXW struct {
 type POINT struct{ X, Y int32 }
 
 type NOTIFYICONDATAW struct {
-	Size           uint32
-	Wnd            windows.Handle
-	ID             uint32
-	Flags          uint32
-	CallbackMsg    uint32
-	Icon           windows.Handle
-	Tip            [128]uint16
-	State          uint32
-	StateMask      uint32
-	Info           [256]uint16
-	Version        uint32
-	InfoTitle      [64]uint16
-	InfoFlags      uint32
-	GuidItem       windows.GUID
-	BalloonIcon   windows.Handle
+	Size        uint32
+	Wnd         windows.Handle
+	ID          uint32
+	Flags       uint32
+	CallbackMsg uint32
+	Icon        windows.Handle
+	Tip         [128]uint16
+	State       uint32
+	StateMask   uint32
+	Info        [256]uint16
+	Version     uint32
+	InfoTitle   [64]uint16
+	InfoFlags   uint32
+	GuidItem    windows.GUID
+	BalloonIcon windows.Handle
 }
 
 const NIF_ICON = 0x00000002
@@ -102,8 +105,8 @@ const LR_LOADFROMFILE = 0x00000010
 const MF_STRING = 0x00000000
 
 var (
-	trayWnd   windows.Handle = 0
-	trayHIcon windows.Handle = 0
+	trayWnd     windows.Handle = 0
+	trayHIcon   windows.Handle = 0
 	icoTempPath string
 )
 
@@ -149,10 +152,10 @@ func startSysTray() {
 	instance, _, _ := windows.NewLazyDLL("kernel32.dll").NewProc("GetModuleHandleW").Call(0)
 
 	wc := WNDCLASSEXW{
-		Size:    uint32(unsafe.Sizeof(WNDCLASSEXW{})),
-		Style:   0,
-		WndProc: syscall.NewCallback(trayWndProc),
-		Instance: windows.Handle(instance),
+		Size:      uint32(unsafe.Sizeof(WNDCLASSEXW{})),
+		Style:     0,
+		WndProc:   syscall.NewCallback(trayWndProc),
+		Instance:  windows.Handle(instance),
 		ClassName: className,
 	}
 	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
@@ -198,12 +201,12 @@ func startSysTray() {
 func addTrayIcon() {
 	title, _ := windows.UTF16FromString("SDWAN Panel")
 	nid := NOTIFYICONDATAW{
-		Size:       uint32(unsafe.Sizeof(NOTIFYICONDATAW{})),
-		Wnd:        trayWnd,
-		ID:         100,
-		Flags:      NIF_ICON | NIF_MESSAGE | NIF_TIP,
+		Size:        uint32(unsafe.Sizeof(NOTIFYICONDATAW{})),
+		Wnd:         trayWnd,
+		ID:          100,
+		Flags:       NIF_ICON | NIF_MESSAGE | NIF_TIP,
 		CallbackMsg: WM_TRAYICON,
-		Icon:       trayHIcon,
+		Icon:        trayHIcon,
 	}
 	copy(nid.Tip[:], title)
 	procShellNotifyIconW.Call(NIM_ADD, uintptr(unsafe.Pointer(&nid)))
@@ -227,12 +230,13 @@ func trayWndProc(hwnd windows.Handle, msg uint32, wParam, lParam uintptr) uintpt
 	switch msg {
 	case WM_TRAYICON:
 		switch lParam {
+		case WM_LBUTTONUP:
+			log.Println("[TRAY] Left click: show panel")
+			signalTrayShow()
+			return 0
 		case WM_LBUTTONDBLCLK:
-			// Left double-click: show panel
-			select {
-			case trayShowCh <- struct{}{}:
-			default:
-			}
+			log.Println("[TRAY] Left double click: show panel")
+			signalTrayShow()
 			return 0
 		case WM_RBUTTONUP:
 			// Right-click: show context menu with just "退出"
@@ -252,7 +256,7 @@ func trayWndProc(hwnd windows.Handle, msg uint32, wParam, lParam uintptr) uintpt
 				deleteTrayIcon()
 				procDestroyWindow.Call(uintptr(hwnd))
 				procPostQuitMessage.Call(0)
-				close(shutdownCh)
+				shutdownOnce.Do(func() { close(shutdownCh) })
 			}
 			return 0
 		}
@@ -262,4 +266,11 @@ func trayWndProc(hwnd windows.Handle, msg uint32, wParam, lParam uintptr) uintpt
 	}
 	ret, _, _ := procDefWindowProcW.Call(uintptr(hwnd), uintptr(msg), wParam, lParam)
 	return ret
+}
+
+func signalTrayShow() {
+	select {
+	case trayShowCh <- struct{}{}:
+	default:
+	}
 }
