@@ -217,6 +217,14 @@ func (m *SdwanManager) SelectServer(id string) bool {
 	_ = m.saveConfig()
 	_ = m.syncIwanConf()
 
+	// Give the old adapter time to fully release before starting the new
+	// core. Without this settle delay, startCore() races with the adapter
+	// deletion and the new process either binds a suffixed name (iwan1 #2)
+	// or exits quickly, causing a green-then-red UI flash.
+	if wasConnected {
+		time.Sleep(750 * time.Millisecond)
+	}
+
 	m.mu.Lock()
 	m.startCore()
 	m.mu.Unlock()
@@ -334,8 +342,17 @@ func (m *SdwanManager) Shutdown() {
 }
 
 func (m *SdwanManager) cleanupAdapter() {
+	// Force-disable the interface to release it before deletion
+	hiddenCommand("netsh", "interface", "set", "interface",
+		"iwan1", "admin=disable").Run()
+
+	// Delete exact iwan1 adapter
 	hiddenCommand("wmic", "path", "Win32_NetworkAdapter",
 		"where", "NetConnectionID='iwan1'", "delete").Run()
+
+	// Also clean up suffixed adapters (iwan1 #2, iwan1 #3, ...)
+	hiddenCommand("wmic", "path", "Win32_NetworkAdapter",
+		"where", "NetConnectionID like 'iwan1%'", "delete").Run()
 }
 
 func (m *SdwanManager) isConnected() bool {
