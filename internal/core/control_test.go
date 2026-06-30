@@ -310,7 +310,7 @@ func TestSwitchEndpointSuccess(t *testing.T) {
 		t.Fatalf("switch called with %q, expected new.example.com", switchedTo)
 	}
 
-	var resp switchResponse
+	var resp SwitchResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}

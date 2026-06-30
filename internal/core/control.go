@@ -85,8 +85,8 @@ type switchRequest struct {
 	Server string `json:"server"`
 }
 
-// switchResponse is the JSON body returned on a successful switch.
-type switchResponse struct {
+// SwitchResponse is the JSON body returned on a successful switch.
+type SwitchResponse struct {
 	Status *StatusResult  `json:"status"`
 	Tunnel *OPENACKResult `json:"tunnel,omitempty"`
 }
@@ -138,7 +138,7 @@ func newControlMux(c *Client, switchFn switchServerFunc) http.Handler {
 			return
 		}
 
-		resp := switchResponse{
+		resp := SwitchResponse{
 			Status: c.Status(),
 			Tunnel: tun,
 		}
