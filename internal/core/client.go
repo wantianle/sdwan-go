@@ -29,6 +29,7 @@ type Session struct {
 	echoCnt   uint32
 	pipeID    uint32
 	pipeIdx   uint32
+	done      chan struct{} // closed when session is torn down
 	closeOnce sync.Once
 }
 
@@ -91,6 +92,7 @@ func newSession(cfg *Config) (*Session, error) {
 		server:  addr,
 		pipeID:  uint32(cfg.PipeID),
 		pipeIdx: uint32(cfg.PipeIdx),
+		done:    make(chan struct{}),
 	}, nil
 }
 
@@ -280,7 +282,9 @@ func (c *Client) tunToServer() {
 }
 
 // heartbeatLoop sends ECHOREQ every 2 seconds; first one fires immediately.
-// Respects stopCh so the goroutine exits cleanly on Close().
+// Returns when either the Client stopCh or the Session done channel closes,
+// so a per-session teardown cancels the heartbeat without waiting for a full
+// Client shutdown.
 func (c *Client) heartbeatLoop(s *Session) {
 	sendBeat := func(s *Session) {
 		s.echoCnt++
@@ -294,6 +298,13 @@ func (c *Client) heartbeatLoop(s *Session) {
 	if s == nil {
 		return
 	}
+	select {
+	case <-c.stopCh:
+		return
+	case <-s.Done():
+		return
+	default:
+	}
 
 	// Fire first heartbeat immediately
 	sendBeat(s)
@@ -303,6 +314,8 @@ func (c *Client) heartbeatLoop(s *Session) {
 	for {
 		select {
 		case <-c.stopCh:
+			return
+		case <-s.Done():
 			return
 		case <-ticker.C:
 			sendBeat(s)
@@ -352,15 +365,29 @@ func connectAndHandshakeSession(cfg *Config) (*Session, []byte, error) {
 }
 
 // Close nil-safely and idempotently closes the underlying UDP connection.
+// It signals session cancellation via the done channel before closing conn
+// so goroutines watching Done() can exit cleanly.
 func (s *Session) Close() {
 	if s == nil {
 		return
 	}
 	s.closeOnce.Do(func() {
+		if s.done != nil {
+			close(s.done)
+		}
 		if s.conn != nil {
 			_ = s.conn.Close()
 		}
 	})
+}
+
+// Done returns a channel that is closed when the session is torn down.
+// Goroutines can select on this alongside stopCh for per-session cancellation.
+func (s *Session) Done() <-chan struct{} {
+	if s == nil {
+		return nil
+	}
+	return s.done
 }
 
 // closeSession atomically swaps the session pointer to nil and closes the
