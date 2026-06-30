@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,23 +37,26 @@ type Session struct {
 
 // Client is the SDWAN tunnel client
 type Client struct {
-	mu             sync.RWMutex // protects session/config/tunConfig swaps
-	config         *Config
-	tunConfig      *OPENACKResult // baseline TUN config from initial handshake
-	TUN            TunDevice
-	session        *Session
-	stopCh         chan struct{}
-	stopped        bool
-	closeOnce      sync.Once
-	packetPumpOnce sync.Once  // ensures tunToServer goroutine is launched once
-	switchMu       sync.Mutex // serializes SwitchServer calls
+	mu               sync.RWMutex // protects session/config/tunConfig swaps
+	config           *Config
+	tunConfig        *OPENACKResult // baseline TUN config from initial handshake
+	TUN              TunDevice
+	session          *Session
+	stopCh           chan struct{}
+	reconnectCh      chan struct{}
+	stopped          bool
+	closeOnce        sync.Once
+	packetPumpOnce   sync.Once // ensures tunToServer goroutine is launched once
+	reconnectStarted atomic.Bool
+	switchMu         sync.Mutex // serializes SwitchServer calls
 }
 
 // NewClient creates a new SDWAN client
 func NewClient(cfg *Config) (*Client, error) {
 	return &Client{
-		config: cfg,
-		stopCh: make(chan struct{}),
+		config:      cfg,
+		stopCh:      make(chan struct{}),
+		reconnectCh: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -63,6 +68,13 @@ func (c *Client) currentSession() *Session {
 	s := c.session
 	c.mu.RUnlock()
 	return s
+}
+
+func (c *Client) isStopped() bool {
+	c.mu.RLock()
+	stopped := c.stopped
+	c.mu.RUnlock()
+	return stopped
 }
 
 // setSession atomically swaps the active session pointer and returns the
@@ -480,7 +492,68 @@ func (c *Client) Start() error {
 	// before accepting DATA, so delay TUN forwarding briefly.
 	time.Sleep(3 * time.Second)
 	c.startPacketPumpOnce()
+	c.startReconnect()
 	return nil
+}
+
+func (c *Client) startReconnect() {
+	if !c.reconnectStarted.CompareAndSwap(false, true) {
+		return
+	}
+	go c.reconnectLoop()
+}
+
+func (c *Client) reconnectLoop() {
+	backoff := time.Second
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-c.reconnectCh:
+		}
+
+		for {
+			select {
+			case <-c.stopCh:
+				return
+			default:
+			}
+
+			if c.currentSession() != nil {
+				backoff = time.Second
+				break
+			}
+			cfg := cloneConfig(c.currentConfig())
+			if cfg == nil {
+				log.Println("[RECONNECT] No config available; waiting")
+			} else {
+				log.Printf("[RECONNECT] Attempting reconnect to %s:%d", cfg.Server, cfg.Port)
+				if _, err := c.SwitchServer(cfg); err != nil {
+					if strings.Contains(err.Error(), "switch already in progress") {
+						log.Printf("[RECONNECT] Switch already in progress; retrying in %s", backoff)
+					} else {
+						log.Printf("[RECONNECT] Reconnect failed: %v; retrying in %s", err, backoff)
+					}
+				} else {
+					log.Println("[RECONNECT] Reconnect succeeded")
+					backoff = time.Second
+					break
+				}
+			}
+
+			select {
+			case <-c.stopCh:
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 8*time.Second {
+				backoff *= 2
+				if backoff > 8*time.Second {
+					backoff = 8 * time.Second
+				}
+			}
+		}
+	}
 }
 
 // startPacketPumpOnce launches the adapter-lifetime TUN→server goroutine
@@ -557,12 +630,20 @@ func (c *Client) failSession(s *Session, reason error) {
 		return
 	}
 	c.mu.Lock()
-	if c.session == s {
+	stopped := c.stopped
+	wasCurrent := c.session == s
+	if wasCurrent {
 		c.session = nil
 	}
 	c.mu.Unlock()
 	log.Printf("[SESSION] Failing session %d: %v", s.id, reason)
 	s.Close()
+	if wasCurrent && !stopped {
+		select {
+		case c.reconnectCh <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // tunToServer reads from the TUN device and forwards packets to the active
@@ -585,7 +666,7 @@ func (c *Client) tunToServer() {
 		}
 		n, err := c.TUN.Read(buf)
 		if err != nil {
-			if c.stopped {
+			if c.isStopped() {
 				return
 			}
 			time.Sleep(50 * time.Millisecond) // prevent tight spin on transient error
@@ -813,7 +894,9 @@ func (c *Client) closeSession() {
 // Close cleans up resources. Safe to call multiple times.
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
+		c.mu.Lock()
 		c.stopped = true
+		c.mu.Unlock()
 		close(c.stopCh)
 		c.closeSession()
 	})
