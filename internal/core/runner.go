@@ -60,36 +60,12 @@ func RunOnce(configPath string) error {
 		cfg.MTU = int(tunCfg.MTU)
 	}
 
-	// 5. Create TUN (Windows TUN mode needs local CIDR to configure the driver)
-	localCIDR := tunCfg.LocalIP + "/24"
-	tun, err := CreateTUN(cfg.TUNName, cfg.MTU, localCIDR)
+	// 5. Create TUN, assign IP, add route (with retry + cleanup wiring)
+	tunName, tunCleanup, err := setupTUN(cfg, tunCfg, client)
 	if err != nil {
-		return fmt.Errorf("create TUN: %w", err)
+		return err
 	}
-	client.TUN = tun
-	defer CloseTUN(tun, cfg.TUNName)
-	log.Printf("[TUN] Created %s (MTU=%d)", tun.Name(), cfg.MTU)
-
-	// 6. Assign IP and bring up
-	tunName := tun.Name()
-	if err := SetTUNIP(tunName, localCIDR, tunCfg.GatewayIP); err != nil {
-		log.Printf("[WARN] Set TUN IP failed: %v", err)
-	} else {
-		log.Printf("[TUN] %s IP=%s/24 gateway=%s", tunName, tunCfg.LocalIP, tunCfg.GatewayIP)
-	}
-
-	// 7. Add route
-	routeGW := tunCfg.LocalIP
-	if err := AddRoute(cfg.RouteNet, tunName, routeGW); err != nil {
-		log.Printf("[WARN] Route add failed (may need to wait): %v", err)
-		// Retry after delay
-		time.Sleep(3 * time.Second)
-		if err := AddRoute(cfg.RouteNet, tunName, routeGW); err != nil {
-			log.Printf("[WARN] Route still failed: %v", err)
-		}
-	}
-	defer DelRoute(cfg.RouteNet, tunName, routeGW)
-	log.Printf("[ROUTE] Added %s -> %s", cfg.RouteNet, cfg.TUNName)
+	defer tunCleanup()
 
 	// 8. Handle signals for clean shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -124,4 +100,41 @@ func RunOnce(configPath string) error {
 
 	log.Println("[INFO] Shutdown complete")
 	return nil
+}
+
+// setupTUN creates the TUN adapter, assigns the server-assigned IP,
+// and adds the route with retry. Returns the adapter name and a cleanup
+// function that caller must defer (DelRoute + CloseTUN).
+func setupTUN(cfg *Config, tunCfg *OPENACKResult, client *Client) (tunName string, cleanup func(), err error) {
+	localCIDR := tunCfg.LocalIP + "/24"
+	tun, err := CreateTUN(cfg.TUNName, cfg.MTU, localCIDR)
+	if err != nil {
+		return "", nil, fmt.Errorf("create TUN: %w", err)
+	}
+	client.TUN = tun
+	log.Printf("[TUN] Created %s (MTU=%d)", tun.Name(), cfg.MTU)
+
+	tunName = tun.Name()
+	if err := SetTUNIP(tunName, localCIDR, tunCfg.GatewayIP); err != nil {
+		log.Printf("[WARN] Set TUN IP failed: %v", err)
+	} else {
+		log.Printf("[TUN] %s IP=%s/24 gateway=%s", tunName, tunCfg.LocalIP, tunCfg.GatewayIP)
+	}
+
+	routeGW := tunCfg.LocalIP
+	if err := AddRoute(cfg.RouteNet, tunName, routeGW); err != nil {
+		log.Printf("[WARN] Route add failed (may need to wait): %v", err)
+		// Retry after delay
+		time.Sleep(3 * time.Second)
+		if err := AddRoute(cfg.RouteNet, tunName, routeGW); err != nil {
+			log.Printf("[WARN] Route still failed: %v", err)
+		}
+	}
+	log.Printf("[ROUTE] Added %s -> %s", cfg.RouteNet, cfg.TUNName)
+
+	cleanup = func() {
+		DelRoute(cfg.RouteNet, tunName, routeGW)
+		CloseTUN(tun, cfg.TUNName)
+	}
+	return tunName, cleanup, nil
 }

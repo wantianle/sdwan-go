@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -30,6 +31,7 @@ type Client struct {
 	pipeIdx   uint32
 	stopCh    chan struct{}
 	stopped   bool
+	closeOnce sync.Once
 }
 
 // NewClient creates a new SDWAN client
@@ -88,10 +90,10 @@ func (c *Client) Handshake() ([]byte, error) {
 				c.conn.Write(openPkt)
 				continue
 			}
-		c.SessionID = ParseSessionID(data)
-		c.seq = ParseOPENACKSeq(data)
-		c.conn.SetReadDeadline(time.Time{})
-		log.Printf("[AUTH] OPENACK received, session=%d seq=%d", c.SessionID, c.seq)
+			c.SessionID = ParseSessionID(data)
+			c.seq = ParseOPENACKSeq(data)
+			c.conn.SetReadDeadline(time.Time{})
+			log.Printf("[AUTH] OPENACK received, session=%d seq=%d", c.SessionID, c.seq)
 			return data, nil
 		}
 		if mt == 0x11 || mt == 0xff {
@@ -170,6 +172,7 @@ func (c *Client) tunToServer() {
 }
 
 // heartbeatLoop sends ECHOREQ every 2 seconds; first one fires immediately.
+// Respects stopCh so the goroutine exits cleanly on Close().
 func (c *Client) heartbeatLoop() {
 	sendBeat := func() {
 		c.echoCnt++
@@ -185,8 +188,13 @@ func (c *Client) heartbeatLoop() {
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		sendBeat()
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-ticker.C:
+			sendBeat()
+		}
 	}
 }
 
@@ -211,11 +219,13 @@ func buildDataPacket(sessionID uint16, seq uint32, payload []byte, encrypt int) 
 	return pkt
 }
 
-// Close cleans up resources
+// Close cleans up resources. Safe to call multiple times.
 func (c *Client) Close() {
-	c.stopped = true
-	close(c.stopCh)
-	if c.conn != nil {
-		c.conn.Close()
-	}
+	c.closeOnce.Do(func() {
+		c.stopped = true
+		close(c.stopCh)
+		if c.conn != nil {
+			c.conn.Close()
+		}
+	})
 }
