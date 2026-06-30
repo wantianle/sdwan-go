@@ -392,6 +392,7 @@ func (c *Client) runSessionToTUN(s *Session) {
 	if err := c.sessionToTUN(s); err != nil {
 		if c.isCurrentSession(s) {
 			log.Printf("[ERROR] Active session ended: %v", err)
+			c.failSession(s, err)
 		} else {
 			log.Printf("[INFO] Previous session ended: %v", err)
 		}
@@ -404,6 +405,25 @@ func (c *Client) runSessionToTUN(s *Session) {
 func (c *Client) startSessionLoops(s *Session) {
 	go c.heartbeatLoop(s)
 	go c.runSessionToTUN(s)
+}
+
+// failSession atomically clears c.session if it still points to s, then
+// closes s. This is the safe reaction to a session-level write failure
+// (e.g. wsasend or connection refused after a network change).
+//
+// It does NOT close TUN, the Client, or the daemon — a future switch or
+// reconnect can create a fresh session on the same TUN adapter.
+func (c *Client) failSession(s *Session, reason error) {
+	if s == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.session == s {
+		c.session = nil
+	}
+	c.mu.Unlock()
+	log.Printf("[SESSION] Failing session %d: %v", s.id, reason)
+	s.Close()
 }
 
 // tunToServer reads from the TUN device and forwards packets to the active
@@ -438,7 +458,9 @@ func (c *Client) tunToServer() {
 			continue
 		}
 		pkt := buildDataPacket(s.id, s.seq, buf[:n], c.currentEncrypt())
-		s.conn.Write(pkt)
+		if _, err := s.conn.Write(pkt); err != nil {
+			c.failSession(s, fmt.Errorf("tun write: %w", err))
+		}
 	}
 }
 
@@ -446,6 +468,8 @@ func (c *Client) tunToServer() {
 // Returns when either the Client stopCh or the Session done channel closes,
 // so a per-session teardown cancels the heartbeat without waiting for a full
 // Client shutdown.
+// Write errors trigger a session failure and exit the loop so the dead
+// UDP socket is torn down (important after network changes).
 func (c *Client) heartbeatLoop(s *Session) {
 	sendBeat := func(s *Session) {
 		s.echoCnt++
@@ -453,6 +477,7 @@ func (c *Client) heartbeatLoop(s *Session) {
 		pkt := BuildEchoReq(s.id, s.seq, ts, s.pipeID, s.pipeIdx, s.echoCnt)
 		if _, err := s.conn.Write(pkt); err != nil {
 			log.Printf("[ERROR] Send ECHOREQ: %v", err)
+			c.failSession(s, err)
 		}
 	}
 

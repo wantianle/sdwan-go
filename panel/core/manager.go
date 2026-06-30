@@ -196,36 +196,76 @@ func (m *SdwanManager) GetServers() []map[string]string {
 	return list
 }
 
-// ToggleConnection starts or stops the tunnel. There is no disconnect API
-// yet, so we only ensure the daemon is running when trying to connect.
+// ToggleConnection checks the daemon's control API status. If the API is
+// reachable but the tunnel is disconnected, it reconnects via POST /v1/switch.
+// If the API is unreachable, it starts the daemon.
 func (m *SdwanManager) ToggleConnection() bool {
 	m.manualChangeSeq.Add(1)
 	m.mu.Lock()
-	wasConnected := m.connected
+	token := m.token
+	controlAddr := m.controlAddr
+	serverName := m.getCurrentServerName()
 	m.mu.Unlock()
 
-	if wasConnected {
-		// No disconnect API — leave daemon running
-		log.Println("[PANEL] No disconnect API; leaving daemon running")
+	if token == "" {
+		go func() {
+			if ok := m.ensureDaemonRunning(); ok && m.onStateChange != nil {
+				m.onStateChange()
+			}
+		}()
+		return m.isConnected()
+	}
+
+	// Check if the daemon API is reachable.
+	sr, err := getControlStatus(controlAddr, token)
+	if err != nil {
+		// API unreachable — start daemon.
+		go func() {
+			if ok := m.ensureDaemonRunning(); ok && m.onStateChange != nil {
+				m.onStateChange()
+			}
+		}()
+		return m.isConnected()
+	}
+
+	// API reachable — update local connected state.
+	m.mu.Lock()
+	m.connected = sr.State == "running"
+	m.mu.Unlock()
+
+	if sr.State == "running" {
 		return true
 	}
 
-	// Start daemon asynchronously — do not hold mu during IO
+	// Tunnel disconnected — reconnect via /v1/switch.
+	log.Printf("[PANEL] Daemon reachable but tunnel disconnected — reconnecting to %s", serverName)
 	go func() {
-		if ok := m.ensureDaemonRunning(); ok && m.onStateChange != nil {
+		_, err := postControlSwitch(controlAddr, token, serverName)
+		if err != nil {
+			log.Printf("[PANEL] Reconnect switch failed: %v", err)
+			m.mu.Lock()
+			m.connected = false
+			m.mu.Unlock()
+		} else {
+			m.mu.Lock()
+			m.connected = true
+			m.mu.Unlock()
+		}
+		if m.onStateChange != nil {
 			m.onStateChange()
 		}
 	}()
+
 	return m.isConnected()
 }
 
-// SelectServer sets the active server. If connected, uses the daemon's
-// POST /v1/switch API. If disconnected, updates config and starts the daemon.
+// SelectServer sets the active server. Prefers the daemon's control API
+// reachability over cached m.connected: if the API responds (even if the
+// tunnel is disconnected), a switch is attempted. Only falls back to
+// start-daemon when the API is completely unreachable.
 //
-// Locking: the validation and snapshot reads happen under mu. The switch API
-// call and daemon start happen without the lock. Persistence (config.json +
-// iwan.conf) only happens AFTER a successful switch, so failed attempts
-// preserve the previous selection.
+// Persistence (config.json + iwan.conf) only happens AFTER a successful
+// switch, so failed attempts preserve the previous selection.
 func (m *SdwanManager) SelectServer(id string) bool {
 	m.manualChangeSeq.Add(1)
 	m.mu.Lock()
@@ -244,52 +284,71 @@ func (m *SdwanManager) SelectServer(id string) bool {
 		return false
 	}
 
-	// Same server — if disconnected, ensure daemon
-	if m.config.CurrentServer == id {
-		wasConnected := m.connected
-		m.mu.Unlock()
-		if !wasConnected {
-			go m.ensureDaemonRunning()
-		}
-		return true
-	}
-
-	// Switching to a different server — take snapshots, release lock
-	wasConnected := m.connected
+	isSameServer := m.config.CurrentServer == id
 	token := m.token
 	controlAddr := m.controlAddr
 	m.mu.Unlock()
 
-	if wasConnected && token != "" {
-		// --- API switch path ---
-		// Call switch FIRST; only persist on success.
+	// Check if the daemon API is reachable.
+	var sr *controlStatusResult
+	apiReachable := false
+	if token != "" {
+		var err error
+		sr, err = getControlStatus(controlAddr, token)
+		apiReachable = err == nil
+	}
+
+	if apiReachable {
+		// --- API reachable ---
+		// Update local connected state from the real daemon status.
+		m.mu.Lock()
+		m.connected = sr.State == "running"
+		m.mu.Unlock()
+
+		// Same server and already running → no-op (avoid unnecessary session reset).
+		if isSameServer && sr.State == "running" {
+			return true
+		}
+
+		// Call switch for reconnection or different-server switch.
 		log.Printf("[PANEL] Switching daemon to %s", targetName)
 		if _, err := postControlSwitch(controlAddr, token, targetName); err != nil {
 			log.Printf("[PANEL] Daemon switch failed: %v", err)
 			m.mu.Lock()
 			m.connected = false
 			m.mu.Unlock()
+			if m.onStateChange != nil {
+				m.onStateChange()
+			}
 			return false
 		}
 
-		// Success — persist the new selection
+		// Success — persist the new selection.
 		m.mu.Lock()
 		m.config.CurrentServer = id
+		m.connected = true
 		m.mu.Unlock()
 		_ = m.saveConfig()
-		_ = m.syncIwanConf()
+		if !isSameServer {
+			_ = m.syncIwanConf()
+		}
 	} else {
-		// --- Disconnected path ---
+		// --- API unreachable ---
 		// Persist first, then start daemon.
-		m.mu.Lock()
-		m.config.CurrentServer = id
-		m.mu.Unlock()
-		_ = m.saveConfig()
-		_ = m.syncIwanConf()
-
+		// For same-server no-op, only try to ensure daemon.
+		if !isSameServer {
+			m.mu.Lock()
+			m.config.CurrentServer = id
+			m.mu.Unlock()
+			_ = m.saveConfig()
+			_ = m.syncIwanConf()
+		}
 		go m.ensureDaemonRunning()
 	}
 
+	if m.onStateChange != nil {
+		m.onStateChange()
+	}
 	return true
 }
 
@@ -594,12 +653,21 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 	// Quick check: is API already responding?
 	if token != "" {
 		sr, err := getControlStatus(controlAddr, token)
-		if err == nil && sr.State == "running" {
+		if err == nil {
+			if sr.State == "running" {
+				m.mu.Lock()
+				m.connected = true
+				m.daemonStarting = false
+				m.mu.Unlock()
+				return true
+			}
+			// API reachable but tunnel disconnected — daemon process is alive,
+			// just needs a reconnection via /v1/switch. Do NOT start a duplicate.
 			m.mu.Lock()
-			m.connected = true
+			m.connected = false
 			m.daemonStarting = false
 			m.mu.Unlock()
-			return true
+			return false
 		}
 		// If API returned 401, the token is wrong → don't start a daemon
 		// that would generate another (mismatched) token.
