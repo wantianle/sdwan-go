@@ -131,6 +131,14 @@ func (c *Client) checkTunnelCompatible(newCfg *OPENACKResult) error {
 	return nil
 }
 
+// isCurrentSession reports whether s is the currently active session.
+func (c *Client) isCurrentSession(s *Session) bool {
+	c.mu.RLock()
+	cur := c.session
+	c.mu.RUnlock()
+	return s == cur
+}
+
 // currentConfig returns a snapshot of the active config pointer.
 func (c *Client) currentConfig() *Config {
 	c.mu.RLock()
@@ -270,6 +278,27 @@ func (c *Client) Run() error {
 	return c.sessionToTUN(s)
 }
 
+// Start launches the per-session loops (heartbeat + server→TUN) and the
+// adapter-lifetime TUN→server packet pump, then returns immediately.
+// Unlike Run() which blocks, Start() is designed for daemon-style callers
+// that keep the Client alive across multiple SwitchServer calls.
+// Must be called after Handshake and after TUN has been configured.
+func (c *Client) Start() error {
+	s := c.currentSession()
+	if s == nil {
+		return fmt.Errorf("not connected: call Connect first")
+	}
+
+	log.Println("[INFO] Tunnel established, starting daemon loops...")
+	c.startSessionLoops(s)
+
+	// Preserve Run()'s protocol timing: the server expects the first ECHOREQ
+	// before accepting DATA, so delay TUN forwarding briefly.
+	time.Sleep(3 * time.Second)
+	c.startPacketPumpOnce()
+	return nil
+}
+
 // startPacketPumpOnce launches the adapter-lifetime TUN→server goroutine
 // exactly once. Safe to call from every Run() invocation.
 func (c *Client) startPacketPumpOnce() {
@@ -308,6 +337,28 @@ func (c *Client) sessionToTUN(s *Session) error {
 			return fmt.Errorf("server CLOSE")
 		}
 	}
+}
+
+// runSessionToTUN calls sessionToTUN(s) and logs the outcome differently
+// depending on whether the session is still current when it exits. This gives
+// clean log output during a SwitchServer transition (the old session's exit is
+// expected, not an error).
+func (c *Client) runSessionToTUN(s *Session) {
+	if err := c.sessionToTUN(s); err != nil {
+		if c.isCurrentSession(s) {
+			log.Printf("[ERROR] Active session ended: %v", err)
+		} else {
+			log.Printf("[INFO] Previous session ended: %v", err)
+		}
+	}
+}
+
+// startSessionLoops launches the per-session heartbeat and server→TUN
+// goroutines for the given session. Both goroutines are bounded to the
+// session's lifetime (done channel) and the Client stopCh.
+func (c *Client) startSessionLoops(s *Session) {
+	go c.heartbeatLoop(s)
+	go c.runSessionToTUN(s)
 }
 
 // tunToServer reads from the TUN device and forwards packets to the active
@@ -485,12 +536,7 @@ func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
 	}
 
 	// h) launch per-session goroutines for the new session
-	go c.heartbeatLoop(newS)
-	go func() {
-		if err := c.sessionToTUN(newS); err != nil {
-			log.Printf("[SWITCH] Session ended: %v", err)
-		}
-	}()
+	c.startSessionLoops(newS)
 
 	// i) ensure TUN→server pump is running
 	c.startPacketPumpOnce()

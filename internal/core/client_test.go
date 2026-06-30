@@ -153,3 +153,38 @@ func TestSwitchServerNilConfig(t *testing.T) {
 		t.Fatal("expected error for nil config, got nil")
 	}
 }
+
+func TestIsCurrentSession(t *testing.T) {
+	cfg := &Config{Server: "test", Username: "u", Password: "p", Port: 10010, MTU: 1436}
+	c, _ := NewClient(cfg)
+
+	// No session set yet — nothing is current.
+	if c.isCurrentSession(&Session{done: make(chan struct{})}) {
+		t.Error("no session set, isCurrentSession should be false")
+	}
+
+	// Create a session and set it.
+	s := &Session{done: make(chan struct{})}
+	c.setSession(s)
+	if !c.isCurrentSession(s) {
+		t.Error("session should be current after setSession")
+	}
+	if c.isCurrentSession(&Session{done: make(chan struct{})}) {
+		t.Error("different pointer should not match as current")
+	}
+
+	// Swap to nil.
+	c.setSession(nil)
+	if c.isCurrentSession(s) {
+		t.Error("after setting nil, old session should not be current")
+	}
+}
+
+func TestStartWithoutSession(t *testing.T) {
+	cfg := &Config{Server: "test", Username: "u", Password: "p", Port: 10010, MTU: 1436}
+	c, _ := NewClient(cfg)
+	err := c.Start()
+	if err == nil {
+		t.Fatal("expected error when calling Start without a session")
+	}
+}
