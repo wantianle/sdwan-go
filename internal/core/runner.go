@@ -55,6 +55,9 @@ func RunOnce(configPath string) error {
 	log.Printf("[TUN] Local IP=%s Gateway=%s DNS=%s MTU=%d",
 		tunCfg.LocalIP, tunCfg.GatewayIP, tunCfg.DNSIP, tunCfg.MTU)
 
+	// Store baseline TUN config so SwitchServer can validate compatibility.
+	client.SetTunnelConfig(tunCfg)
+
 	// Override config MTU if server sent one
 	if tunCfg.MTU > 0 {
 		cfg.MTU = int(tunCfg.MTU)

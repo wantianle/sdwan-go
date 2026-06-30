@@ -35,8 +35,9 @@ type Session struct {
 
 // Client is the SDWAN tunnel client
 type Client struct {
-	mu             sync.RWMutex // protects session pointer swaps
+	mu             sync.RWMutex // protects session/config/tunConfig swaps
 	config         *Config
+	tunConfig      *OPENACKResult // baseline TUN config from initial handshake
 	TUN            TunDevice
 	session        *Session
 	stopCh         chan struct{}
@@ -72,6 +73,70 @@ func (c *Client) setSession(s *Session) (old *Session) {
 	c.session = s
 	c.mu.Unlock()
 	return
+}
+
+// SetTunnelConfig stores the baseline TUN configuration from the initial
+// handshake so SwitchServer can validate compatibility with new servers.
+func (c *Client) SetTunnelConfig(t *OPENACKResult) {
+	c.mu.Lock()
+	c.tunConfig = t
+	c.mu.Unlock()
+}
+
+// currentTunConfig returns a snapshot of the baseline tunnel config.
+func (c *Client) currentTunConfig() *OPENACKResult {
+	c.mu.RLock()
+	t := c.tunConfig
+	c.mu.RUnlock()
+	return t
+}
+
+// currentEncrypt returns the current encrypt setting under the read lock.
+func (c *Client) currentEncrypt() int {
+	c.mu.RLock()
+	e := c.config.Encrypt
+	c.mu.RUnlock()
+	return e
+}
+
+// cloneConfig returns a shallow copy of cfg so SwitchServer can use a
+// modified config without mutating the caller's pointer.
+func cloneConfig(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
+	cpy := *cfg
+	return &cpy
+}
+
+// checkTunnelCompatible returns an error if the new OPENACKResult would
+// require TUN reconfiguration (different IPs or a conflicting MTU).
+func (c *Client) checkTunnelCompatible(newCfg *OPENACKResult) error {
+	old := c.currentTunConfig()
+	if old == nil {
+		return fmt.Errorf("no baseline tunnel config: call SetTunnelConfig first")
+	}
+	if newCfg.LocalIP != old.LocalIP {
+		return fmt.Errorf("incompatible LocalIP: new=%s old=%s", newCfg.LocalIP, old.LocalIP)
+	}
+	if newCfg.GatewayIP != old.GatewayIP {
+		return fmt.Errorf("incompatible GatewayIP: new=%s old=%s", newCfg.GatewayIP, old.GatewayIP)
+	}
+	if newCfg.MTU > 0 {
+		cfg := c.currentConfig()
+		if int(newCfg.MTU) != cfg.MTU {
+			return fmt.Errorf("MTU mismatch: new=%d current=%d", newCfg.MTU, cfg.MTU)
+		}
+	}
+	return nil
+}
+
+// currentConfig returns a snapshot of the active config pointer.
+func (c *Client) currentConfig() *Config {
+	c.mu.RLock()
+	cfg := c.config
+	c.mu.RUnlock()
+	return cfg
 }
 
 // newSession resolves and dials the UDP server from config, returning a
@@ -276,7 +341,7 @@ func (c *Client) tunToServer() {
 			// drop packet — no active session
 			continue
 		}
-		pkt := buildDataPacket(s.id, s.seq, buf[:n], c.config.Encrypt)
+		pkt := buildDataPacket(s.id, s.seq, buf[:n], c.currentEncrypt())
 		s.conn.Write(pkt)
 	}
 }
@@ -362,6 +427,76 @@ func connectAndHandshakeSession(cfg *Config) (*Session, []byte, error) {
 		return nil, nil, err
 	}
 	return s, raw, nil
+}
+
+// SwitchServer connects and handshakes to the server described by next,
+// validates that the new server is tunnel-compatible with the existing TUN
+// configuration, then atomically swaps the active session and config.
+//
+// On success the old session is torn down, heartbeat and server→TUN
+// goroutines are started for the new session, and the parsed OPENACK is
+// returned. On failure the new session is closed and an error is returned;
+// the existing session is left untouched.
+func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
+	// a) clone + validate
+	nextCfg := cloneConfig(next)
+	if nextCfg == nil {
+		return nil, fmt.Errorf("switch: nil config")
+	}
+	if err := nextCfg.Validate(); err != nil {
+		return nil, fmt.Errorf("switch: invalid config: %w", err)
+	}
+
+	// b) connect + handshake
+	newS, raw, err := connectAndHandshakeSession(nextCfg)
+	if err != nil {
+		return nil, fmt.Errorf("switch: %w", err)
+	}
+
+	// c) parse OPENACK
+	tunCfg := ParseOPENACK(raw)
+	if tunCfg.LocalIP == "" || tunCfg.GatewayIP == "" {
+		newS.Close()
+		return nil, fmt.Errorf("switch: OPENACK missing IP info")
+	}
+
+	// d) check tunnel compatibility
+	if err := c.checkTunnelCompatible(tunCfg); err != nil {
+		newS.Close()
+		return nil, fmt.Errorf("switch: incompatible: %w", err)
+	}
+
+	// Override config MTU before publishing nextCfg so readers never observe
+	// the pre-OPENACK effective MTU after the switch is committed.
+	if tunCfg.MTU > 0 {
+		nextCfg.MTU = int(tunCfg.MTU)
+	}
+
+	// e+f) atomically swap session + config
+	c.mu.Lock()
+	old := c.session
+	c.session = newS
+	c.config = nextCfg
+	c.mu.Unlock()
+
+	// g) close old session after swap (so tunToServer sees new session)
+	if old != nil {
+		old.Close()
+	}
+
+	// h) launch per-session goroutines for the new session
+	go c.heartbeatLoop(newS)
+	go func() {
+		if err := c.sessionToTUN(newS); err != nil {
+			log.Printf("[SWITCH] Session ended: %v", err)
+		}
+	}()
+
+	// i) ensure TUN→server pump is running
+	c.startPacketPumpOnce()
+
+	log.Printf("[SWITCH] Switched to %s:%d session=%d", nextCfg.Server, nextCfg.Port, newS.id)
+	return tunCfg, nil
 }
 
 // Close nil-safely and idempotently closes the underlying UDP connection.
