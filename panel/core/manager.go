@@ -217,14 +217,6 @@ func (m *SdwanManager) SelectServer(id string) bool {
 	_ = m.saveConfig()
 	_ = m.syncIwanConf()
 
-	// Give the old adapter time to fully release before starting the new
-	// core. Without this settle delay, startCore() races with the adapter
-	// deletion and the new process either binds a suffixed name (iwan1 #2)
-	// or exits quickly, causing a green-then-red UI flash.
-	if wasConnected {
-		time.Sleep(750 * time.Millisecond)
-	}
-
 	m.mu.Lock()
 	m.startCore()
 	m.mu.Unlock()
@@ -336,9 +328,8 @@ func (m *SdwanManager) Shutdown() {
 	defer m.mu.Unlock()
 	if m.connected {
 		m.stopCore()
-	} else {
-		m.cleanupAdapter()
 	}
+	m.cleanupAdapter()
 }
 
 func (m *SdwanManager) cleanupAdapter() {
@@ -581,7 +572,6 @@ func (m *SdwanManager) startCore() {
 func (m *SdwanManager) stopCore() {
 	if m.cmd == nil || m.cmd.Process == nil {
 		m.connected = false
-		m.cleanupAdapter()
 		return
 	}
 
@@ -601,8 +591,6 @@ func (m *SdwanManager) stopCore() {
 		m.logFile.Close()
 		m.logFile = nil
 	}
-
-	m.cleanupAdapter()
 
 	log.Printf("[CORE] Stopped sdwan.exe (PID: %d)", pid)
 	if m.onStateChange != nil {

@@ -39,31 +39,41 @@ func (d *wintunDev) Close() error { return d.dev.Close() }
 // CreateTUN creates a wintun TUN adapter (Layer 3, reads/writes IP packets).
 // localCIDR is accepted for cross-platform signature compatibility; unused here
 // because wintun does not need IP pre-configuration like tap0901 TUN mode does.
+//
+// On server switch (panel restart), the adapter should persist so the new
+// process can reuse it seamlessly. Only delete+recreate if the existing
+// adapter is in a bad state (crash residue) and CreateTUN fails.
 func CreateTUN(name string, mtu int, _ string) (TunDevice, error) {
 	log.Printf("[WINTUN] Creating adapter name=%q mtu=%d", name, mtu)
 	log.Printf("[WINTUN] Note: wintun adapter may not be visible in ncpa.cpl; use Device Manager or 'wmic nic get Name,Index' to verify")
 
-	// Remove stale adapters with the same name left over from crashes.
-	// Without this, each restart creates a new numbered wintun device.
-	if out, err := exec.Command("wmic", "path", "Win32_NetworkAdapter",
-		"where", fmt.Sprintf("NetConnectionID='%s'", name), "delete").CombinedOutput(); err == nil {
-		log.Printf("[WINTUN] Cleaned up old adapter %q", name)
-	} else {
-		log.Printf("[WINTUN] No old adapter to clean (or delete failed): %s", string(out))
-	}
-
+	// Try to reuse the existing adapter first — this preserves the adapter
+	// across server switches so we don't delete/recreate it unnecessarily.
 	dev, err := tun.CreateTUN(name, mtu)
 	if err != nil {
-		log.Printf("[WINTUN] FAILED: %v", err)
-		log.Printf("[WINTUN] Common causes: (1) not run as Administrator, (2) wintun.dll not in same dir as exe, (3) driver blocked by antivirus")
-		return nil, fmt.Errorf("create wintun adapter: %w", err)
+		log.Printf("[WINTUN] Reuse failed (%v), cleaning up stale adapter and retrying...", err)
+		// Adapter likely in a bad state from a crash; delete it and retry.
+		if out, errDel := exec.Command("wmic", "path", "Win32_NetworkAdapter",
+			"where", fmt.Sprintf("NetConnectionID='%s'", name), "delete").CombinedOutput(); errDel == nil {
+			log.Printf("[WINTUN] Cleaned up old adapter %q, retrying CreateTUN", name)
+		} else {
+			log.Printf("[WINTUN] Cleanup attempt: %s", string(out))
+		}
+
+		dev, err = tun.CreateTUN(name, mtu)
+		if err != nil {
+			log.Printf("[WINTUN] FAILED after cleanup: %v", err)
+			log.Printf("[WINTUN] Common causes: (1) not run as Administrator, (2) wintun.dll not in same dir as exe, (3) driver blocked by antivirus")
+			return nil, fmt.Errorf("create wintun adapter: %w", err)
+		}
 	}
 
-	// Give Windows a moment to register the new adapter in the IP stack
+	// Give Windows a moment to register the adapter in the IP stack.
+	// This also helps when reusing — the driver may need a tick to settle.
 	time.Sleep(500 * time.Millisecond)
 
 	ifaceName, _ := dev.Name()
-	log.Printf("[WINTUN] Adapter created, name=%q", ifaceName)
+	log.Printf("[WINTUN] Adapter ready, name=%q", ifaceName)
 	return &wintunDev{dev: dev, name: ifaceName}, nil
 }
 
