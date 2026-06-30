@@ -4,15 +4,14 @@ import (
 	"bufio"
 	"crypto/aes"
 	"crypto/md5"
-	"encoding/json"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,7 +35,8 @@ type Config struct {
 }
 
 // SdwanManager is a singleton that manages the SD-WAN tunnel lifecycle
-// by driving the real sdwan-windows-amd64.exe subprocess.
+// by supervising the sdwan-windows-amd64.exe daemon process and driving
+// server selection through the daemon's HTTP control API.
 type SdwanManager struct {
 	mu              sync.Mutex
 	exeDir          string
@@ -46,15 +46,19 @@ type SdwanManager struct {
 	connected       bool
 	latency         int64
 	serverLatency   map[string]int64 // per-server latency
-	cmd             *exec.Cmd
+	daemonCmd       *exec.Cmd        // the daemon subprocess
+	daemonStarting  bool             // true while ensureDaemonRunning is launching
 	logFile         *os.File
-	stopCh          chan struct{}    // signals the latency probe to stop
-	probeTrigger    chan struct{}    // triggers an immediate probe
-	probePaused     atomic.Bool      // true = probes suspended (panel hidden)
+	controlAddr     string        // "127.0.0.1:17890"
+	tokenPath       string        // path to control.token
+	token           string        // loaded bearer token
+	stopCh          chan struct{} // signals poller / latency probe to stop
+	probeTrigger    chan struct{} // triggers an immediate probe
+	probePaused     atomic.Bool   // true = probes suspended (panel hidden)
 	autoConnecting  atomic.Bool
 	manualChangeSeq atomic.Uint64
 	lastAutoAttempt atomic.Int64
-	onStateChange   func()           // optional callback for UI refresh
+	onStateChange   func() // optional callback for UI refresh
 }
 
 var instance *SdwanManager
@@ -73,8 +77,16 @@ func GetManager() *SdwanManager {
 			iwanPath:      filepath.Join(dir, "iwan.conf"),
 			config:        defaultConfig(),
 			serverLatency: make(map[string]int64),
+			controlAddr:   "127.0.0.1:17890",
+			tokenPath:     filepath.Join(dir, "control.token"),
 			stopCh:        make(chan struct{}),
 			probeTrigger:  make(chan struct{}, 1),
+		}
+		// Generates token on first install so panel and daemon share one.
+		if tok, err := loadOrGenerateToken(m.tokenPath); err == nil {
+			m.token = tok
+		} else {
+			log.Printf("[PANEL] Token init failed: %v", err)
 		}
 		m.loadConfig()
 		go m.latencyProbe()
@@ -126,14 +138,33 @@ func (m *SdwanManager) saveConfig() error {
 	return os.WriteFile(m.configPath, data, 0644)
 }
 
-// GetStatus returns the current connection state.
+// GetStatus returns the current connection state, preferring the daemon's
+// control API when available. Snapshot fields under lock, make the HTTP
+// call outside the lock, then reacquire to update m.connected.
 func (m *SdwanManager) GetStatus() map[string]interface{} {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	token := m.token
+	controlAddr := m.controlAddr
+	hasDaemonCmd := m.daemonCmd != nil && m.daemonCmd.Process != nil
+	m.mu.Unlock()
 
-	// Check if the process is still alive
-	if m.connected && m.cmd != nil && m.cmd.Process != nil {
-		// Quick non-blocking check without signalling
+	// Refresh connected state from API if we have a token
+	if token != "" {
+		sr, err := getControlStatus(controlAddr, token)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if err == nil {
+			m.connected = sr.State == "running"
+		} else if !hasDaemonCmd {
+			// API unavailable — only go false if we don't own a process
+			m.connected = false
+		}
+	} else {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if !hasDaemonCmd {
+			m.connected = false
+		}
 	}
 
 	return map[string]interface{}{
@@ -165,29 +196,46 @@ func (m *SdwanManager) GetServers() []map[string]string {
 	return list
 }
 
-// ToggleConnection starts or stops the sdwan.exe subprocess.
+// ToggleConnection starts or stops the tunnel. There is no disconnect API
+// yet, so we only ensure the daemon is running when trying to connect.
 func (m *SdwanManager) ToggleConnection() bool {
 	m.manualChangeSeq.Add(1)
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	wasConnected := m.connected
+	m.mu.Unlock()
 
-	if m.connected {
-		m.stopCore(false)
-	} else {
-		m.startCore()
+	if wasConnected {
+		// No disconnect API — leave daemon running
+		log.Println("[PANEL] No disconnect API; leaving daemon running")
+		return true
 	}
-	return m.connected
+
+	// Start daemon asynchronously — do not hold mu during IO
+	go func() {
+		if ok := m.ensureDaemonRunning(); ok && m.onStateChange != nil {
+			m.onStateChange()
+		}
+	}()
+	return m.isConnected()
 }
 
-// SelectServer sets the active server. If connected, reconnects with the new server.
+// SelectServer sets the active server. If connected, uses the daemon's
+// POST /v1/switch API. If disconnected, updates config and starts the daemon.
+//
+// Locking: the validation and snapshot reads happen under mu. The switch API
+// call and daemon start happen without the lock. Persistence (config.json +
+// iwan.conf) only happens AFTER a successful switch, so failed attempts
+// preserve the previous selection.
 func (m *SdwanManager) SelectServer(id string) bool {
 	m.manualChangeSeq.Add(1)
 	m.mu.Lock()
 
 	found := false
+	targetName := ""
 	for _, s := range m.config.Servers {
 		if s.ID == id {
 			found = true
+			targetName = s.Name
 			break
 		}
 	}
@@ -196,58 +244,66 @@ func (m *SdwanManager) SelectServer(id string) bool {
 		return false
 	}
 
+	// Same server — if disconnected, ensure daemon
 	if m.config.CurrentServer == id {
 		wasConnected := m.connected
 		m.mu.Unlock()
 		if !wasConnected {
-			m.mu.Lock()
-			m.startCore()
-			m.mu.Unlock()
+			go m.ensureDaemonRunning()
 		}
 		return true
 	}
 
+	// Switching to a different server — take snapshots, release lock
 	wasConnected := m.connected
-	if wasConnected {
-		m.stopCore(true)
-	}
-	m.config.CurrentServer = id
+	token := m.token
+	controlAddr := m.controlAddr
 	m.mu.Unlock()
 
-	_ = m.saveConfig()
-	_ = m.syncIwanConf()
+	if wasConnected && token != "" {
+		// --- API switch path ---
+		// Call switch FIRST; only persist on success.
+		log.Printf("[PANEL] Switching daemon to %s", targetName)
+		if _, err := postControlSwitch(controlAddr, token, targetName); err != nil {
+			log.Printf("[PANEL] Daemon switch failed: %v", err)
+			m.mu.Lock()
+			m.connected = false
+			m.mu.Unlock()
+			return false
+		}
 
-	// When switching servers, the old core process is already killed but
-	// its tunnel_windows.go cleanup (netsh disable + wmic delete) may still
-	// be in flight. A short settle avoids the new process racing on the
-	// adapter name and creating a suffixed duplicate (iwan1 #2).
-	if wasConnected {
-		time.Sleep(1500 * time.Millisecond)
+		// Success — persist the new selection
+		m.mu.Lock()
+		m.config.CurrentServer = id
+		m.mu.Unlock()
+		_ = m.saveConfig()
+		_ = m.syncIwanConf()
+	} else {
+		// --- Disconnected path ---
+		// Persist first, then start daemon.
+		m.mu.Lock()
+		m.config.CurrentServer = id
+		m.mu.Unlock()
+		_ = m.saveConfig()
+		_ = m.syncIwanConf()
+
+		go m.ensureDaemonRunning()
 	}
 
-	m.mu.Lock()
-	m.startCore()
-	m.mu.Unlock()
 	return true
 }
 
-// Reload re-reads both config files and restarts sdwan if needed.
+// Reload re-reads config.json.
 func (m *SdwanManager) Reload() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.loadConfig()
-
-	if m.connected {
-		m.stopCore(true)
-		m.startCore()
-	}
 	return true
 }
 
-// AutoConnect attempts one bounded startup connection pass.
-// Order: current server first, then remaining servers by lowest known latency,
-// falling back to config order for unknown latencies.
+// AutoConnect ensures the daemon is running and connected on the configured
+// server. This is called on panel startup and when the panel is shown.
 func (m *SdwanManager) AutoConnect() {
 	if m.connected {
 		return
@@ -264,29 +320,14 @@ func (m *SdwanManager) AutoConnect() {
 		return
 	}
 
-	go func(seq uint64) {
+	go func() {
 		defer m.autoConnecting.Store(false)
-
-		if m.isManualSequenceChanged(seq) || m.isConnected() {
-			return
-		}
-
 		m.probeOnce()
-		candidates := m.autoConnectCandidates()
-		for _, id := range candidates {
-			if m.isManualSequenceChanged(seq) || m.isConnected() {
-				return
-			}
-			if !m.tryAutoConnectCandidate(id) {
-				continue
-			}
-			if m.waitForStableConnection(8 * time.Second, seq) {
-				log.Printf("[AUTO] Connected using server %s", id)
-				return
-			}
+		ok := m.ensureDaemonRunning()
+		if ok && m.onStateChange != nil {
+			m.onStateChange()
 		}
-		log.Println("[AUTO] No server established a stable startup connection")
-	}(m.manualChangeSeq.Load())
+	}()
 }
 
 // EditConfig opens iwan.conf with Windows Notepad.
@@ -334,24 +375,10 @@ func (m *SdwanManager) Shutdown() {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.connected {
-		m.stopCore(false)
-	}
-	m.cleanupAdapter()
-}
 
-func (m *SdwanManager) cleanupAdapter() {
-	// Force-disable the interface to release it before deletion
-	hiddenCommand("netsh", "interface", "set", "interface",
-		"iwan1", "admin=disable").Run()
-
-	// Delete exact iwan1 adapter
-	hiddenCommand("wmic", "path", "Win32_NetworkAdapter",
-		"where", "NetConnectionID='iwan1'", "delete").Run()
-
-	// Also clean up suffixed adapters (iwan1 #2, iwan1 #3, ...)
-	hiddenCommand("wmic", "path", "Win32_NetworkAdapter",
-		"where", "NetConnectionID like 'iwan1%'", "delete").Run()
+	// Keep daemon running — it owns the TUN adapter lifecycle now.
+	// Do NOT delete iwan1; daemon handles adapter independently.
+	log.Println("[PANEL] Shutdown — leaving daemon running")
 }
 
 func (m *SdwanManager) isConnected() bool {
@@ -362,92 +389,6 @@ func (m *SdwanManager) isConnected() bool {
 
 func (m *SdwanManager) isManualSequenceChanged(seq uint64) bool {
 	return m.manualChangeSeq.Load() != seq
-}
-
-func (m *SdwanManager) autoConnectCandidates() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	type candidate struct {
-		id      string
-		latency int64
-		index   int
-	}
-
-	current := m.config.CurrentServer
-	remaining := make([]candidate, 0, len(m.config.Servers))
-	ordered := make([]string, 0, len(m.config.Servers))
-
-	for i, s := range m.config.Servers {
-		if s.ID == current {
-			ordered = append(ordered, s.ID)
-			continue
-		}
-		remaining = append(remaining, candidate{id: s.ID, latency: m.serverLatency[s.ID], index: i})
-	}
-
-	sort.SliceStable(remaining, func(i, j int) bool {
-		li, lj := remaining[i].latency, remaining[j].latency
-		ki := li > 0
-		kj := lj > 0
-		if ki != kj {
-			return ki
-		}
-		if ki && lj != li {
-			return li < lj
-		}
-		return remaining[i].index < remaining[j].index
-	})
-
-	for _, c := range remaining {
-		ordered = append(ordered, c.id)
-	}
-	return ordered
-}
-
-func (m *SdwanManager) tryAutoConnectCandidate(id string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.connected {
-		return true
-	}
-
-	found := false
-	for _, s := range m.config.Servers {
-		if s.ID == id {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return false
-	}
-
-	m.config.CurrentServer = id
-	if err := m.saveConfig(); err != nil {
-		log.Printf("[AUTO] Failed to save config for server %s: %v", id, err)
-	}
-	if err := m.syncIwanConf(); err != nil {
-		log.Printf("[AUTO] Failed to sync iwan.conf for server %s: %v", id, err)
-	}
-	log.Printf("[AUTO] Trying server %s (%s)", id, m.getCurrentServerName())
-	m.startCore()
-	return m.connected
-}
-
-func (m *SdwanManager) waitForStableConnection(timeout time.Duration, seq uint64) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if m.isManualSequenceChanged(seq) {
-			return false
-		}
-		if !m.isConnected() {
-			return false
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	return m.isConnected() && !m.isManualSequenceChanged(seq)
 }
 
 // --- iwan.conf sync -------------------------------------------------
@@ -502,108 +443,206 @@ routenet=192.168.0.0/16
 	return os.WriteFile(m.iwanPath, []byte(content), 0644)
 }
 
-// --- real core: process management -----------------------------------
+// --- daemon supervisor -------------------------------------------------
 
-func (m *SdwanManager) startCore() {
+// startDaemon launches sdwan-windows-amd64.exe in daemon mode (-daemon).
+// It does NOT block or wait for the daemon to become ready; callers should
+// use ensureDaemonRunning for that.
+func (m *SdwanManager) startDaemon() {
 	exePath := filepath.Join(m.exeDir, "sdwan-windows-amd64.exe")
 
 	if _, err := os.Stat(exePath); os.IsNotExist(err) {
-		log.Printf("[CORE] sdwan.exe not found at %s", exePath)
-		m.connected = false
+		log.Printf("[DAEMON] sdwan-windows-amd64.exe not found at %s", exePath)
 		return
 	}
 
-	// Sync iwan.conf before starting
+	// Sync iwan.conf before starting daemon
 	if err := m.syncIwanConf(); err != nil {
-		log.Printf("[CORE] Failed to sync iwan.conf: %v", err)
+		log.Printf("[DAEMON] Failed to sync iwan.conf: %v", err)
 	}
 
-	// Open log file
+	// Open log file for daemon stdout/stderr
 	logPath := filepath.Join(m.exeDir, "sdwan.log")
 	lf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		log.Printf("[CORE] Warning: Could not open log file: %v", err)
+		log.Printf("[DAEMON] Warning: Could not open log file: %v", err)
 	}
 	m.logFile = lf
 
-	m.cmd = hiddenCommand(exePath)
-	m.cmd.Dir = m.exeDir
+	m.daemonCmd = hiddenCommand(exePath,
+		"-daemon",
+		"-f", m.iwanPath,
+		"-control", m.controlAddr,
+		"-token-file", m.tokenPath,
+	)
+	m.daemonCmd.Dir = m.exeDir
 
 	if lf != nil {
-		m.cmd.Stdout = lf
-		m.cmd.Stderr = lf
+		m.daemonCmd.Stdout = lf
+		m.daemonCmd.Stderr = lf
 	}
 
-	if err := m.cmd.Start(); err != nil {
-		log.Printf("[CORE] Failed to start sdwan.exe: %v", err)
-		m.connected = false
+	if err := m.daemonCmd.Start(); err != nil {
+		log.Printf("[DAEMON] Failed to start daemon: %v", err)
+		m.daemonCmd = nil
 		if lf != nil {
 			lf.Close()
 		}
 		return
 	}
 
-	m.connected = true
-	log.Printf("[CORE] Started sdwan.exe (PID: %d), server=%s", m.cmd.Process.Pid, m.getCurrentServerName())
-	if m.onStateChange != nil {
-		m.onStateChange()
-	}
+	log.Printf("[DAEMON] Started daemon (PID: %d)", m.daemonCmd.Process.Pid)
 
-	// Monitor process exit
+	// Capture locals so the monitor goroutine does not reference the
+	// mutable m.daemonCmd / m.logFile fields after unlock.
+	cmd := m.daemonCmd
+	lf = m.logFile
+
+	// Monitor process exit in background
 	go func() {
-		err := m.cmd.Wait()
+		_ = cmd.Wait()
 		m.mu.Lock()
 		wasRunning := m.connected
-		m.connected = false
-		m.latency = 0
+		// Only clear daemonCmd if it's still this instance (not replaced by a
+		// second start).
+		if m.daemonCmd == cmd {
+			m.daemonCmd = nil
+		}
+		m.daemonStarting = false
 		m.mu.Unlock()
 
-		if err != nil {
-			log.Printf("[CORE] sdwan.exe exited with error: %v", err)
-		} else {
-			log.Println("[CORE] sdwan.exe exited normally")
+		if lf != nil {
+			lf.Close()
+			m.mu.Lock()
+			// Only clear logFile if it hasn't been replaced.
+			if m.logFile == lf {
+				m.logFile = nil
+			}
+			m.mu.Unlock()
 		}
 
-		if m.logFile != nil {
-			m.logFile.Close()
-			m.logFile = nil
-		}
-
-		// Notify state change even on crash/exit
 		if wasRunning && m.onStateChange != nil {
 			m.onStateChange()
 		}
 	}()
-
 }
 
-func (m *SdwanManager) stopCore(suppressNotify bool) {
-	if m.cmd == nil || m.cmd.Process == nil {
-		m.connected = false
+// stopDaemon kills the daemon subprocess if we own it (panel started it).
+func (m *SdwanManager) stopDaemon() {
+	if m.daemonCmd == nil || m.daemonCmd.Process == nil {
 		return
 	}
 
-	pid := m.cmd.Process.Pid
-
-	// Try graceful shutdown via taskkill
+	pid := m.daemonCmd.Process.Pid
 	taskkill := hiddenCommand("taskkill", "/PID", fmt.Sprintf("%d", pid))
 	if err := taskkill.Run(); err != nil {
-		log.Printf("[CORE] taskkill failed, force killing: %v", err)
-		m.cmd.Process.Kill()
+		log.Printf("[DAEMON] taskkill failed, force killing: %v", err)
+		m.daemonCmd.Process.Kill()
 	}
 
-	m.connected = false
-	m.latency = 0
+	log.Printf("[DAEMON] Stopped daemon (PID: %d)", pid)
+	m.daemonCmd = nil
 
 	if m.logFile != nil {
 		m.logFile.Close()
 		m.logFile = nil
 	}
+}
 
-	log.Printf("[CORE] Stopped sdwan.exe (PID: %d)", pid)
-	if !suppressNotify && m.onStateChange != nil {
-		m.onStateChange()
+// ensureDaemonRunning checks whether the daemon is reachable via its control
+// API. If not, it starts the daemon and polls the API until ready (bounded).
+//
+// This method does NOT hold m.mu while making HTTP calls or starting
+// processes. It briefly locks to read/write m.connected, m.daemonCmd, and
+// m.daemonStarting.
+//
+// Returns true if the daemon is confirmed running via its control API.
+//
+// Uses a double-checked lock pattern to prevent duplicate daemon starts:
+// the second check (under lock, just before setting daemonStarting=true)
+// falls through to the polling path if another goroutine already started.
+func (m *SdwanManager) ensureDaemonRunning() bool {
+	// Take snapshots outside the lock so we don't hold mu during IO.
+	m.mu.Lock()
+	token := m.token
+	controlAddr := m.controlAddr
+	alreadyStarted := m.daemonCmd != nil || m.daemonStarting
+	m.mu.Unlock()
+
+	// Quick check: is API already responding?
+	if token != "" {
+		sr, err := getControlStatus(controlAddr, token)
+		if err == nil && sr.State == "running" {
+			m.mu.Lock()
+			m.connected = true
+			m.daemonStarting = false
+			m.mu.Unlock()
+			return true
+		}
+		// If API returned 401, the token is wrong → don't start a daemon
+		// that would generate another (mismatched) token.
+		if isAuthError(err) {
+			log.Printf("[DAEMON] Token/auth mismatch — not starting duplicate daemon")
+			m.mu.Lock()
+			m.daemonStarting = false
+			m.mu.Unlock()
+			return false
+		}
 	}
+
+	// Guard: if a daemon is already running or starting, just poll.
+	if alreadyStarted {
+		return m.pollDaemonReady(token, controlAddr)
+	}
+
+	// Second check under lock: re-verify no one else started while we were
+	// doing the initial API quick-check above.
+	m.mu.Lock()
+	if m.daemonCmd != nil || m.daemonStarting {
+		m.mu.Unlock()
+		return m.pollDaemonReady(token, controlAddr)
+	}
+
+	m.daemonStarting = true
+	m.startDaemon()
+	if m.daemonCmd == nil {
+		// startDaemon failed (binary missing, etc.)
+		m.daemonStarting = false
+		m.mu.Unlock()
+		return false
+	}
+	m.mu.Unlock()
+
+	// Poll API for up to 20 seconds
+	if ok := m.pollDaemonReady(token, controlAddr); ok {
+		return true
+	}
+
+	m.mu.Lock()
+	m.daemonStarting = false
+	m.mu.Unlock()
+	return false
+}
+
+// pollDaemonReady blocks for up to 20 seconds polling the daemon's control
+// API. It acquires m.mu only briefly to update m.connected.
+func (m *SdwanManager) pollDaemonReady(token, controlAddr string) bool {
+	if token == "" {
+		return false
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(1 * time.Second)
+		if sr, err := getControlStatus(controlAddr, token); err == nil && sr.State == "running" {
+			m.mu.Lock()
+			m.connected = true
+			m.daemonStarting = false
+			m.mu.Unlock()
+			return true
+		}
+	}
+	log.Println("[DAEMON] Daemon did not become ready in time")
+	return false
 }
 
 // --- latency probe ---------------------------------------------------

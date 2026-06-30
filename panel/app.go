@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -30,10 +29,9 @@ func (a *App) startup(ctx context.Context) {
 			runtime.EventsEmit(a.ctx, "panel:state-changed")
 		}
 	})
-	go a.manager.WatchIwanConf(func() {
-		log.Println("[APP] iwan.conf changed, restarting...")
-		a.manager.Reload()
-	})
+	// WatchIwanConf is disabled — the daemon owns iwan.conf now and the
+	// panel synchronises server= via the control API, not by rewriting the
+	// config file and restarting.
 	a.manager.AutoConnect()
 }
 
