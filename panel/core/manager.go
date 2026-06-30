@@ -172,7 +172,7 @@ func (m *SdwanManager) ToggleConnection() bool {
 	defer m.mu.Unlock()
 
 	if m.connected {
-		m.stopCore()
+		m.stopCore(false)
 	} else {
 		m.startCore()
 	}
@@ -209,13 +209,21 @@ func (m *SdwanManager) SelectServer(id string) bool {
 
 	wasConnected := m.connected
 	if wasConnected {
-		m.stopCore()
+		m.stopCore(true)
 	}
 	m.config.CurrentServer = id
 	m.mu.Unlock()
 
 	_ = m.saveConfig()
 	_ = m.syncIwanConf()
+
+	// When switching servers, the old core process is already killed but
+	// its tunnel_windows.go cleanup (netsh disable + wmic delete) may still
+	// be in flight. A short settle avoids the new process racing on the
+	// adapter name and creating a suffixed duplicate (iwan1 #2).
+	if wasConnected {
+		time.Sleep(1500 * time.Millisecond)
+	}
 
 	m.mu.Lock()
 	m.startCore()
@@ -231,7 +239,7 @@ func (m *SdwanManager) Reload() bool {
 	m.loadConfig()
 
 	if m.connected {
-		m.stopCore()
+		m.stopCore(true)
 		m.startCore()
 	}
 	return true
@@ -327,7 +335,7 @@ func (m *SdwanManager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.connected {
-		m.stopCore()
+		m.stopCore(false)
 	}
 	m.cleanupAdapter()
 }
@@ -569,7 +577,7 @@ func (m *SdwanManager) startCore() {
 
 }
 
-func (m *SdwanManager) stopCore() {
+func (m *SdwanManager) stopCore(suppressNotify bool) {
 	if m.cmd == nil || m.cmd.Process == nil {
 		m.connected = false
 		return
@@ -593,7 +601,7 @@ func (m *SdwanManager) stopCore() {
 	}
 
 	log.Printf("[CORE] Stopped sdwan.exe (PID: %d)", pid)
-	if m.onStateChange != nil {
+	if !suppressNotify && m.onStateChange != nil {
 		m.onStateChange()
 	}
 }
