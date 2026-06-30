@@ -147,6 +147,51 @@ func (c *Client) currentConfig() *Config {
 	return cfg
 }
 
+// StatusResult is a read-only snapshot of the current tunnel state for the
+// control API. All fields are thread-safe snapshots.
+type StatusResult struct {
+	State     string `json:"state"` // "running" or "disconnected"
+	Server    string `json:"server"`
+	Port      int    `json:"port"`
+	SessionID uint16 `json:"session_id"`
+	TUN       string `json:"tun"`
+	LocalIP   string `json:"local_ip"`
+	GatewayIP string `json:"gateway_ip"`
+	Route     string `json:"route"`
+	MTU       int    `json:"mtu"`
+}
+
+// Status returns a thread-safe snapshot of the current tunnel state.
+func (c *Client) Status() *StatusResult {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	sr := &StatusResult{State: "disconnected"}
+
+	if c.session != nil && c.session.id != 0 {
+		sr.State = "running"
+		sr.SessionID = c.session.id
+	}
+
+	if c.config != nil {
+		sr.Server = c.config.Server
+		sr.Port = c.config.Port
+		sr.Route = c.config.RouteNet
+		sr.MTU = c.config.MTU
+	}
+
+	if c.tunConfig != nil {
+		sr.LocalIP = c.tunConfig.LocalIP
+		sr.GatewayIP = c.tunConfig.GatewayIP
+	}
+
+	if c.TUN != nil {
+		sr.TUN = c.TUN.Name()
+	}
+
+	return sr
+}
+
 // newSession resolves and dials the UDP server from config, returning a
 // Session with the live connection but without performing a handshake.
 func newSession(cfg *Config) (*Session, error) {

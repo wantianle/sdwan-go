@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -105,7 +106,7 @@ func RunOnce(configPath string) error {
 	return nil
 }
 
-// ControlOptions holds daemon-mode settings (HTTP control API not wired yet).
+// ControlOptions holds daemon-mode local control API settings.
 type ControlOptions struct {
 	Addr      string // control listen address, e.g. "127.0.0.1:17890"
 	TokenFile string // optional path to a static token file
@@ -177,15 +178,36 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 		return fmt.Errorf("daemon start: %w", err)
 	}
 
-	// 7. Signal handling
+	// 7. Load or generate control token
+	tokenFile := opts.TokenFile
+	if tokenFile == "" {
+		tokenFile = DefaultTokenPath(configPath)
+	}
+	token, err := loadOrGenerateToken(tokenFile)
+	if err != nil {
+		return fmt.Errorf("control token: %w", err)
+	}
+
+	// 8. Start control API server
+	srv, err := startControlServer(opts.Addr, token, client)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+
+	// 9. Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	// 8. Show status
+	// 10. Show status
 	fmt.Println()
 	log.Println("[STATUS] SDWAN daemon running")
-	log.Printf("  Control: %s", opts.Addr)
+	log.Printf("  Control: %s  (token: %s)", opts.Addr, tokenFile)
 	log.Printf("  Server:  %s:%d", cfg.Server, cfg.Port)
 	log.Printf("  User:    %s", cfg.Username)
 	log.Printf("  Session: %d", client.SessionID())
@@ -193,7 +215,7 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 	log.Printf("  Route:   %s -> %s", cfg.RouteNet, tunName)
 	fmt.Println()
 
-	// 9. Wait for shutdown signal
+	// 11. Wait for shutdown signal
 	sig := <-sigCh
 	log.Printf("[INFO] Received signal %v, shutting down...", sig)
 	log.Println("[INFO] Daemon shutdown complete")
