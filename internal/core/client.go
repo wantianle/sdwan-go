@@ -22,13 +22,14 @@ type TunDevice interface {
 // Extracted from Client so future daemon/server-switch paths can create,
 // teardown, and swap sessions independently of the TUN/adapter lifecycle.
 type Session struct {
-	conn    *net.UDPConn
-	server  *net.UDPAddr
-	id      uint16
-	seq     uint32
-	echoCnt uint32
-	pipeID  uint32
-	pipeIdx uint32
+	conn      *net.UDPConn
+	server    *net.UDPAddr
+	id        uint16
+	seq       uint32
+	echoCnt   uint32
+	pipeID    uint32
+	pipeIdx   uint32
+	closeOnce sync.Once
 }
 
 // Client is the SDWAN tunnel client
@@ -257,13 +258,30 @@ func buildDataPacket(sessionID uint16, seq uint32, payload []byte, encrypt int) 
 	return pkt
 }
 
+// Close nil-safely and idempotently closes the underlying UDP connection.
+func (s *Session) Close() {
+	if s == nil {
+		return
+	}
+	s.closeOnce.Do(func() {
+		if s.conn != nil {
+			_ = s.conn.Close()
+		}
+	})
+}
+
+// closeSession tears down the current session if one exists.
+func (c *Client) closeSession() {
+	if c.session != nil {
+		c.session.Close()
+	}
+}
+
 // Close cleans up resources. Safe to call multiple times.
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
 		c.stopped = true
 		close(c.stopCh)
-		if c.session != nil && c.session.conn != nil {
-			c.session.conn.Close()
-		}
+		c.closeSession()
 	})
 }
