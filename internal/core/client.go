@@ -18,17 +18,24 @@ type TunDevice interface {
 	Close() error
 }
 
+// Session holds the UDP connection and protocol session state for one server.
+// Extracted from Client so future daemon/server-switch paths can create,
+// teardown, and swap sessions independently of the TUN/adapter lifecycle.
+type Session struct {
+	conn    *net.UDPConn
+	server  *net.UDPAddr
+	id      uint16
+	seq     uint32
+	echoCnt uint32
+	pipeID  uint32
+	pipeIdx uint32
+}
+
 // Client is the SDWAN tunnel client
 type Client struct {
 	config    *Config
-	conn      *net.UDPConn
-	server    *net.UDPAddr
 	TUN       TunDevice
-	SessionID uint16
-	seq       uint32
-	echoCnt   uint32
-	pipeID    uint32
-	pipeIdx   uint32
+	session   *Session
 	stopCh    chan struct{}
 	stopped   bool
 	closeOnce sync.Once
@@ -37,45 +44,62 @@ type Client struct {
 // NewClient creates a new SDWAN client
 func NewClient(cfg *Config) (*Client, error) {
 	return &Client{
-		config:  cfg,
-		pipeID:  uint32(cfg.PipeID),
-		pipeIdx: uint32(cfg.PipeIdx),
-		stopCh:  make(chan struct{}),
+		config: cfg,
+		stopCh: make(chan struct{}),
 	}, nil
 }
 
-// Connect opens the UDP socket and sends the OPEN request
+// Connect opens the UDP socket and initialises the Session.
 func (c *Client) Connect() error {
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", c.config.Server, c.config.Port))
 	if err != nil {
 		return fmt.Errorf("resolve server: %w", err)
 	}
-	c.server = addr
 
 	conn, err := net.DialUDP("udp", nil, addr)
 	if err != nil {
 		return fmt.Errorf("dial UDP: %w", err)
 	}
-	c.conn = conn
 
+	c.session = &Session{
+		conn:    conn,
+		server:  addr,
+		pipeID:  uint32(c.config.PipeID),
+		pipeIdx: uint32(c.config.PipeIdx),
+	}
 	return nil
 }
 
+// SessionID returns the current protocol session identifier.
+// Returns 0 if the client has not completed a handshake.
+func (c *Client) SessionID() uint16 {
+	if c.session == nil {
+		return 0
+	}
+	return c.session.id
+}
+
 // Handshake sends OPEN and waits for OPENACK. Returns the raw OPENACK data.
+// Must be called after Connect.
 func (c *Client) Handshake() ([]byte, error) {
+	s := c.session
+	if s == nil {
+		return nil, fmt.Errorf("not connected: call Connect first")
+	}
+
 	// Send OPEN
 	openPkt := BuildOpenPacket(c.config)
 	log.Println("[AUTH] Sending OPEN...")
-	if _, err := c.conn.Write(openPkt); err != nil {
+	if _, err := s.conn.Write(openPkt); err != nil {
 		return nil, fmt.Errorf("send OPEN: %w", err)
 	}
 
 	// Wait for OPENACK
 	buf := make([]byte, 2048)
-	c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	s.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
 	for {
-		n, err := c.conn.Read(buf)
+		n, err := s.conn.Read(buf)
 		if err != nil {
 			return nil, fmt.Errorf("read OPENACK: %w", err)
 		}
@@ -87,13 +111,13 @@ func (c *Client) Handshake() ([]byte, error) {
 		if mt == MsgOPENACK {
 			if !PktVerify(data) {
 				log.Println("[AUTH] OPENACK signature mismatch, retrying...")
-				c.conn.Write(openPkt)
+				s.conn.Write(openPkt)
 				continue
 			}
-			c.SessionID = ParseSessionID(data)
-			c.seq = ParseOPENACKSeq(data)
-			c.conn.SetReadDeadline(time.Time{})
-			log.Printf("[AUTH] OPENACK received, session=%d seq=%d", c.SessionID, c.seq)
+			s.id = ParseSessionID(data)
+			s.seq = ParseOPENACKSeq(data)
+			s.conn.SetReadDeadline(time.Time{})
+			log.Printf("[AUTH] OPENACK received, session=%d seq=%d", s.id, s.seq)
 			return data, nil
 		}
 		if mt == 0x11 || mt == 0xff {
@@ -102,24 +126,30 @@ func (c *Client) Handshake() ([]byte, error) {
 	}
 }
 
-// Run starts the main event loop (heartbeat + data forwarding)
+// Run starts the main event loop (heartbeat + data forwarding).
+// Must be called after Handshake.
 func (c *Client) Run() error {
+	s := c.session
+	if s == nil {
+		return fmt.Errorf("not connected: call Connect first")
+	}
+
 	log.Println("[INFO] Tunnel established, starting main loop...")
 
 	// Heartbeat goroutine — fires first beat immediately
-	go c.heartbeatLoop()
+	go c.heartbeatLoop(s)
 
 	// Delay TUN forwarding until session is stable.
 	// The server requires the first ECHOREQ handshake before accepting DATA.
 	time.Sleep(3 * time.Second)
 
 	// Read from TUN → send to server
-	go c.tunToServer()
+	go c.tunToServer(s)
 
 	// Main loop: read from server → write to TUN
 	buf := make([]byte, 2048)
 	for {
-		n, err := c.conn.Read(buf)
+		n, err := s.conn.Read(buf)
 		if err != nil {
 			log.Printf("[ERROR] Read from server: %v", err)
 			return err
@@ -146,7 +176,7 @@ func (c *Client) Run() error {
 }
 
 // tunToServer reads from TUN device and sends to server
-func (c *Client) tunToServer() {
+func (c *Client) tunToServer(s *Session) {
 	buf := make([]byte, 2048)
 	for {
 		select {
@@ -166,25 +196,33 @@ func (c *Client) tunToServer() {
 			time.Sleep(50 * time.Millisecond) // prevent tight spin on transient error
 			continue
 		}
-		pkt := buildDataPacket(c.SessionID, c.seq, buf[:n], c.config.Encrypt)
-		c.conn.Write(pkt)
+		if s == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		pkt := buildDataPacket(s.id, s.seq, buf[:n], c.config.Encrypt)
+		s.conn.Write(pkt)
 	}
 }
 
 // heartbeatLoop sends ECHOREQ every 2 seconds; first one fires immediately.
 // Respects stopCh so the goroutine exits cleanly on Close().
-func (c *Client) heartbeatLoop() {
-	sendBeat := func() {
-		c.echoCnt++
+func (c *Client) heartbeatLoop(s *Session) {
+	sendBeat := func(s *Session) {
+		s.echoCnt++
 		ts := uint64(time.Now().UnixNano() / 1000)
-		pkt := BuildEchoReq(c.SessionID, c.seq, ts, c.pipeID, c.pipeIdx, c.echoCnt)
-		if _, err := c.conn.Write(pkt); err != nil {
+		pkt := BuildEchoReq(s.id, s.seq, ts, s.pipeID, s.pipeIdx, s.echoCnt)
+		if _, err := s.conn.Write(pkt); err != nil {
 			log.Printf("[ERROR] Send ECHOREQ: %v", err)
 		}
 	}
 
+	if s == nil {
+		return
+	}
+
 	// Fire first heartbeat immediately
-	sendBeat()
+	sendBeat(s)
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -193,7 +231,7 @@ func (c *Client) heartbeatLoop() {
 		case <-c.stopCh:
 			return
 		case <-ticker.C:
-			sendBeat()
+			sendBeat(s)
 		}
 	}
 }
@@ -224,8 +262,8 @@ func (c *Client) Close() {
 	c.closeOnce.Do(func() {
 		c.stopped = true
 		close(c.stopCh)
-		if c.conn != nil {
-			c.conn.Close()
+		if c.session != nil && c.session.conn != nil {
+			c.session.conn.Close()
 		}
 	})
 }

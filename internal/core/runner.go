@@ -77,7 +77,7 @@ func RunOnce(configPath string) error {
 	log.Println("[STATUS] SDWAN tunnel is running")
 	log.Printf("  Server:  %s:%d", cfg.Server, cfg.Port)
 	log.Printf("  User:    %s", cfg.Username)
-	log.Printf("  Session: %d", client.SessionID)
+	log.Printf("  Session: %d", client.SessionID())
 	log.Printf("  TUN:     %s", tunName)
 	log.Printf("  Route:   %s -> %s", cfg.RouteNet, tunName)
 	fmt.Println()
