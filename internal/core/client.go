@@ -34,6 +34,7 @@ type Session struct {
 
 // Client is the SDWAN tunnel client
 type Client struct {
+	mu        sync.RWMutex // protects session pointer swaps
 	config    *Config
 	TUN       TunDevice
 	session   *Session
@@ -48,6 +49,27 @@ func NewClient(cfg *Config) (*Client, error) {
 		config: cfg,
 		stopCh: make(chan struct{}),
 	}, nil
+}
+
+// currentSession returns the active session pointer under the read lock.
+// The returned pointer is a snapshot — callers must not rely on it
+// remaining current after the lock is released.
+func (c *Client) currentSession() *Session {
+	c.mu.RLock()
+	s := c.session
+	c.mu.RUnlock()
+	return s
+}
+
+// setSession atomically swaps the active session pointer and returns the
+// previous session (nil if none). The old session is NOT closed by this
+// helper — callers are responsible for closing it if needed.
+func (c *Client) setSession(s *Session) (old *Session) {
+	c.mu.Lock()
+	old = c.session
+	c.session = s
+	c.mu.Unlock()
+	return
 }
 
 // newSession resolves and dials the UDP server from config, returning a
@@ -72,31 +94,37 @@ func newSession(cfg *Config) (*Session, error) {
 }
 
 // Connect opens the UDP socket and initialises the Session.
+// If a session already exists it is closed before the new one is assigned.
 func (c *Client) Connect() error {
 	s, err := newSession(c.config)
 	if err != nil {
 		return err
 	}
-	c.session = s
+	old := c.setSession(s)
+	if old != nil {
+		old.Close()
+	}
 	return nil
 }
 
 // SessionID returns the current protocol session identifier.
 // Returns 0 if the client has not completed a handshake.
 func (c *Client) SessionID() uint16 {
-	if c.session == nil {
+	s := c.currentSession()
+	if s == nil {
 		return 0
 	}
-	return c.session.id
+	return s.id
 }
 
 // Handshake sends OPEN and waits for OPENACK. Returns the raw OPENACK data.
 // Must be called after Connect.
 func (c *Client) Handshake() ([]byte, error) {
-	if c.session == nil {
+	s := c.currentSession()
+	if s == nil {
 		return nil, fmt.Errorf("not connected: call Connect first")
 	}
-	return c.session.Handshake(c.config)
+	return s.Handshake(c.config)
 }
 
 // Handshake sends the OPEN packet over this session's UDP connection and
@@ -152,24 +180,29 @@ func (s *Session) Handshake(cfg *Config) ([]byte, error) {
 // Run starts the main event loop (heartbeat + data forwarding).
 // Must be called after Handshake.
 func (c *Client) Run() error {
-	s := c.session
+	s := c.currentSession()
 	if s == nil {
 		return fmt.Errorf("not connected: call Connect first")
 	}
 
 	log.Println("[INFO] Tunnel established, starting main loop...")
 
-	// Heartbeat goroutine — fires first beat immediately
+	// Heartbeat goroutine — fires first beat immediately, operates on
+	// the snapshot captured at Run entry.
 	go c.heartbeatLoop(s)
 
 	// Delay TUN forwarding until session is stable.
 	// The server requires the first ECHOREQ handshake before accepting DATA.
 	time.Sleep(3 * time.Second)
 
-	// Read from TUN → send to server
-	go c.tunToServer(s)
+	// Adapter-lifetime TUN→server packet pump.
+	// It calls currentSession() per-packet so a future session swap is
+	// picked up without restarting the goroutine.
+	go c.tunToServer()
 
-	// Main loop: read from server → write to TUN
+	// Server→TUN read loop: bound to the session snapshot.
+	// When this session closes or errors, Run returns and the caller
+	// can restart the main loop with a new session.
 	buf := make([]byte, 2048)
 	for {
 		n, err := s.conn.Read(buf)
@@ -198,8 +231,13 @@ func (c *Client) Run() error {
 	}
 }
 
-// tunToServer reads from TUN device and sends to server
-func (c *Client) tunToServer(s *Session) {
+// tunToServer reads from the TUN device and forwards packets to the active
+// session. It calls currentSession() per-packet so a future session swap is
+// picked up without restarting the goroutine.
+//
+// When no active session exists the packet is silently dropped to avoid
+// backpressure during a switch transition.
+func (c *Client) tunToServer() {
 	buf := make([]byte, 2048)
 	for {
 		select {
@@ -219,8 +257,9 @@ func (c *Client) tunToServer(s *Session) {
 			time.Sleep(50 * time.Millisecond) // prevent tight spin on transient error
 			continue
 		}
+		s := c.currentSession()
 		if s == nil {
-			time.Sleep(100 * time.Millisecond)
+			// drop packet — no active session
 			continue
 		}
 		pkt := buildDataPacket(s.id, s.seq, buf[:n], c.config.Encrypt)
@@ -312,10 +351,12 @@ func (s *Session) Close() {
 	})
 }
 
-// closeSession tears down the current session if one exists.
+// closeSession atomically swaps the session pointer to nil and closes the
+// previous session if one existed.
 func (c *Client) closeSession() {
-	if c.session != nil {
-		c.session.Close()
+	old := c.setSession(nil)
+	if old != nil {
+		old.Close()
 	}
 }
 
