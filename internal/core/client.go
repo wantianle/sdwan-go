@@ -34,13 +34,14 @@ type Session struct {
 
 // Client is the SDWAN tunnel client
 type Client struct {
-	mu        sync.RWMutex // protects session pointer swaps
-	config    *Config
-	TUN       TunDevice
-	session   *Session
-	stopCh    chan struct{}
-	stopped   bool
-	closeOnce sync.Once
+	mu             sync.RWMutex // protects session pointer swaps
+	config         *Config
+	TUN            TunDevice
+	session        *Session
+	stopCh         chan struct{}
+	stopped        bool
+	closeOnce      sync.Once
+	packetPumpOnce sync.Once // ensures tunToServer goroutine is launched once
 }
 
 // NewClient creates a new SDWAN client
@@ -195,14 +196,25 @@ func (c *Client) Run() error {
 	// The server requires the first ECHOREQ handshake before accepting DATA.
 	time.Sleep(3 * time.Second)
 
-	// Adapter-lifetime TUN→server packet pump.
-	// It calls currentSession() per-packet so a future session swap is
-	// picked up without restarting the goroutine.
-	go c.tunToServer()
+	// Start the adapter-lifetime TUN→server packet pump (idempotent
+	// across multiple Run calls).
+	c.startPacketPumpOnce()
 
-	// Server→TUN read loop: bound to the session snapshot.
-	// When this session closes or errors, Run returns and the caller
-	// can restart the main loop with a new session.
+	return c.sessionToTUN(s)
+}
+
+// startPacketPumpOnce launches the adapter-lifetime TUN→server goroutine
+// exactly once. Safe to call from every Run() invocation.
+func (c *Client) startPacketPumpOnce() {
+	c.packetPumpOnce.Do(func() {
+		go c.tunToServer()
+	})
+}
+
+// sessionToTUN reads packets from the given session and writes them to TUN.
+// Returns when the session connection closes or errors, allowing the caller
+// to restart the loop with a new session.
+func (c *Client) sessionToTUN(s *Session) error {
 	buf := make([]byte, 2048)
 	for {
 		n, err := s.conn.Read(buf)
