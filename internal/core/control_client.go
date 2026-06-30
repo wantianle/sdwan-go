@@ -61,6 +61,17 @@ func ControlSwitch(addr, token, server string) (*SwitchResponse, error) {
 	return &resp, nil
 }
 
+// ControlShutdown sends a graceful shutdown request to a running sdwan daemon
+// via POST /v1/shutdown. addr should be "host:port" (no scheme).
+func ControlShutdown(addr, token string) error {
+	url := "http://" + addr + "/v1/shutdown"
+	_, err := doControlRequest(http.MethodPost, url, token, nil)
+	if err != nil {
+		return fmt.Errorf("shutdown: %w", err)
+	}
+	return nil
+}
+
 func doControlRequest(method, url, token string, body io.Reader) ([]byte, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest(method, url, body)

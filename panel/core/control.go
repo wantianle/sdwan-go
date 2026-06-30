@@ -127,6 +127,13 @@ func postControlSwitch(addr, token, server string) (*controlSwitchResponse, erro
 	return &resp, nil
 }
 
+// postControlShutdown sends a graceful shutdown request to the daemon.
+func postControlShutdown(addr, token string) error {
+	url := "http://" + addr + "/v1/shutdown"
+	_, err := controlRequest(http.MethodPost, url, token, nil)
+	return err
+}
+
 func controlRequest(method, url, token string, body io.Reader) ([]byte, error) {
 	client := &http.Client{Timeout: controlTimeout}
 	req, err := http.NewRequest(method, url, body)

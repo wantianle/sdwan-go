@@ -94,7 +94,9 @@ type SwitchResponse struct {
 // newControlMux builds the /v1/* handler tree backed by the given Client and
 // switch function. Tests call this directly with a mock switch; production
 // passes c.SwitchServer.
-func newControlMux(c *Client, switchFn switchServerFunc) http.Handler {
+// shutdownCh is an optional channel that will be signalled when POST /v1/shutdown
+// is called; pass nil if the caller does not need shutdown signalling.
+func newControlMux(c *Client, switchFn switchServerFunc, shutdownCh chan<- struct{}) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/v1/status", func(w http.ResponseWriter, r *http.Request) {
@@ -146,14 +148,34 @@ func newControlMux(c *Client, switchFn switchServerFunc) http.Handler {
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	mux.HandleFunc("/v1/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+
+		// Signal the daemon to exit gracefully. Non-blocking send so the
+		// handler returns cleanly even if the listener has already left.
+		if shutdownCh != nil {
+			select {
+			case shutdownCh <- struct{}{}:
+			default:
+			}
+		}
+	})
+
 	return mux
 }
 
 // startControlServer binds an HTTP server on addr and serves the /v1/*
 // namespace behind Bearer token authentication.  The returned server must
 // be shut down by the caller.
-func startControlServer(addr string, token string, c *Client) (*http.Server, error) {
-	mux := newControlMux(c, c.SwitchServer)
+// shutdownCh is an optional channel that receives a signal when
+// POST /v1/shutdown is successfully called.
+func startControlServer(addr string, token string, c *Client, shutdownCh chan<- struct{}) (*http.Server, error) {
+	mux := newControlMux(c, c.SwitchServer, shutdownCh)
 	authMux := bearerAuth(mux, token)
 
 	ln, err := net.Listen("tcp", addr)

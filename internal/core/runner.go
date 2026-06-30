@@ -189,7 +189,8 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 	}
 
 	// 8. Start control API server
-	srv, err := startControlServer(opts.Addr, token, client)
+	shutdownCh := make(chan struct{}, 1)
+	srv, err := startControlServer(opts.Addr, token, client, shutdownCh)
 	if err != nil {
 		return err
 	}
@@ -215,9 +216,13 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 	log.Printf("  Route:   %s -> %s", cfg.RouteNet, tunName)
 	fmt.Println()
 
-	// 11. Wait for shutdown signal
-	sig := <-sigCh
-	log.Printf("[INFO] Received signal %v, shutting down...", sig)
+	// 11. Wait for shutdown signal (SIGINT/SIGTERM or API shutdown)
+	select {
+	case sig := <-sigCh:
+		log.Printf("[INFO] Received signal %v, shutting down...", sig)
+	case <-shutdownCh:
+		log.Println("[INFO] Received shutdown via control API")
+	}
 	log.Println("[INFO] Daemon shutdown complete")
 	return nil
 }

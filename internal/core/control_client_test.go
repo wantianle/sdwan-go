@@ -139,3 +139,40 @@ func TestControlClientSwitchError(t *testing.T) {
 		t.Fatal("expected error for 500 response")
 	}
 }
+
+func TestControlClientShutdown(t *testing.T) {
+	var reqMethod, reqAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqMethod = r.Method
+		reqAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer ts.Close()
+
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	err := ControlShutdown(addr, "shutdown-tok")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if reqMethod != http.MethodPost {
+		t.Errorf("method: got %q, want POST", reqMethod)
+	}
+	if reqAuth != "Bearer shutdown-tok" {
+		t.Errorf("Authorization: got %q, want Bearer shutdown-tok", reqAuth)
+	}
+}
+
+func TestControlClientShutdownError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"gone"}`, http.StatusGone)
+	}))
+	defer ts.Close()
+
+	addr := strings.TrimPrefix(ts.URL, "http://")
+	err := ControlShutdown(addr, "tok")
+	if err == nil {
+		t.Fatal("expected error for non-200 response")
+	}
+}

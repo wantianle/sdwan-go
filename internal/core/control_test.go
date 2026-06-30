@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadTokenExisting(t *testing.T) {
@@ -208,7 +209,7 @@ func newTestClient() *Client {
 // authMux wraps newControlMux output with bearerAuth so we can exercise
 // the full auth + handler stack in one request.
 func authMux(c *Client, fn switchServerFunc, token string) http.Handler {
-	return bearerAuth(newControlMux(c, fn), token)
+	return bearerAuth(newControlMux(c, fn, nil), token)
 }
 
 func TestSwitchEndpointRejectsGET(t *testing.T) {
@@ -381,6 +382,72 @@ func TestSwitchEndpointServerOnly(t *testing.T) {
 	}
 	if received.Username != "u" {
 		t.Errorf("username: got %q, want original value", received.Username)
+	}
+}
+
+func TestShutdownEndpointRejectsGET(t *testing.T) {
+	c := newTestClient()
+	h := authMux(c, nil, "tok")
+	req := httptest.NewRequest(http.MethodGet, "/v1/shutdown", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestShutdownEndpointAuthRejected(t *testing.T) {
+	c := newTestClient()
+	h := authMux(c, nil, "tok")
+	req := httptest.NewRequest(http.MethodPost, "/v1/shutdown", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestShutdownEndpointSignalsChannel(t *testing.T) {
+	c := newTestClient()
+	shutdownCh := make(chan struct{}, 1)
+
+	// Use newControlMux directly with a shutdown channel.
+	mux := newControlMux(c, nil, shutdownCh)
+	h := bearerAuth(mux, "tok")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/shutdown", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Channel must have received the signal.
+	select {
+	case <-shutdownCh:
+		// ok
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("shutdown channel was not signalled")
+	}
+}
+
+func TestShutdownEndpointWithoutChannel(t *testing.T) {
+	c := newTestClient()
+
+	// newControlMux with nil shutdownCh must not panic.
+	mux := newControlMux(c, nil, nil)
+	h := bearerAuth(mux, "tok")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/shutdown", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 }
 

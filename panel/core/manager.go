@@ -368,6 +368,30 @@ func (m *SdwanManager) SuspendProbes() {
 }
 
 func (m *SdwanManager) Shutdown() {
+	// Signal the daemon to exit gracefully before stopping probes.
+	// The daemon runs existing defers: route delete, TUN close, adapter cleanup.
+	m.mu.Lock()
+	token := m.token
+	controlAddr := m.controlAddr
+	m.mu.Unlock()
+
+	if token != "" {
+		log.Println("[PANEL] Sending shutdown to daemon...")
+		var err error
+		for i := 0; i < 5; i++ {
+			err = postControlShutdown(controlAddr, token)
+			if err == nil {
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		if err != nil {
+			log.Printf("[PANEL] Daemon shutdown request failed after retries: %v", err)
+		}
+		// Small settle so the daemon has time to begin cleanup.
+		time.Sleep(500 * time.Millisecond)
+	}
+
 	select {
 	case m.stopCh <- struct{}{}:
 	default:
@@ -376,9 +400,7 @@ func (m *SdwanManager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Keep daemon running — it owns the TUN adapter lifecycle now.
-	// Do NOT delete iwan1; daemon handles adapter independently.
-	log.Println("[PANEL] Shutdown — leaving daemon running")
+	log.Println("[PANEL] Shutdown — probes stopped, daemon shutting down")
 }
 
 func (m *SdwanManager) isConnected() bool {
