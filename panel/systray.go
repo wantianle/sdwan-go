@@ -36,7 +36,8 @@ const (
 	WM_RBUTTONUP     = 0x0205
 	WM_LBUTTONUP     = 0x0202
 	WM_DESTROY       = 0x0002
-	IDM_EXIT         = 1
+	IDM_SHOW         = 1
+	IDM_EXIT         = 2
 )
 
 var (
@@ -239,10 +240,12 @@ func trayWndProc(hwnd windows.Handle, msg uint32, wParam, lParam uintptr) uintpt
 			signalTrayShow()
 			return 0
 		case WM_RBUTTONUP:
-			// Right-click: show context menu with just "退出"
+			// Right-click: show context menu
 			procSetForegroundWindow.Call(uintptr(hwnd))
 			hMenu, _, _ := procCreatePopupMenu.Call()
+			showStr, _ := windows.UTF16PtrFromString("显示面板")
 			exitStr, _ := windows.UTF16PtrFromString("退出 SDWAN Panel")
+			procAppendMenuW.Call(hMenu, MF_STRING, IDM_SHOW, uintptr(unsafe.Pointer(showStr)))
 			procAppendMenuW.Call(hMenu, MF_STRING, IDM_EXIT, uintptr(unsafe.Pointer(exitStr)))
 			var pt POINT
 			procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
@@ -252,7 +255,11 @@ func trayWndProc(hwnd windows.Handle, msg uint32, wParam, lParam uintptr) uintpt
 				uintptr(pt.X), uintptr(pt.Y),
 				0, uintptr(hwnd), 0,
 			)
-			if cmd == IDM_EXIT {
+			switch cmd {
+			case IDM_SHOW:
+				log.Println("[TRAY] Right menu show selected")
+				signalTrayShow()
+			case IDM_EXIT:
 				deleteTrayIcon()
 				procDestroyWindow.Call(uintptr(hwnd))
 				procPostQuitMessage.Call(0)

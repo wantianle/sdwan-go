@@ -48,14 +48,7 @@ func main() {
 	// Show-panel signal watcher — positions panel at screen center
 	go func() {
 		for range trayShowCh {
-			log.Println("[DEBUG] Show panel signal received")
-			if appCtx != nil {
-				log.Println("[DEBUG] Tray show: WindowShow + WindowCenter")
-				wailsRuntime.WindowShow(appCtx)
-				wailsRuntime.WindowCenter(appCtx)
-				app.OnPanelShown() // resume probes + immediate refresh after visible
-				log.Println("[DEBUG] Tray show: OnPanelShown complete")
-			}
+			showPanel("tray signal", appCtx, app)
 		}
 	}()
 
@@ -89,11 +82,7 @@ func main() {
 			log.Println("[DEBUG] OnDomReady called — frontend loaded")
 			go func() {
 				time.Sleep(300 * time.Millisecond)
-				log.Println("[DEBUG] Auto showing panel on first DOM ready")
-				wailsRuntime.WindowShow(ctx)
-				wailsRuntime.WindowCenter(ctx)
-				app.OnPanelShown()
-				log.Println("[DEBUG] Auto show: OnPanelShown complete")
+				showPanel("first DOM ready", ctx, app)
 			}()
 		},
 		OnShutdown: func(ctx context.Context) {
@@ -108,6 +97,22 @@ func main() {
 		log.Fatalf("Wails error: %v", err)
 	}
 	log.Println("[DEBUG] Wails.Run returned normally")
+}
+
+func showPanel(reason string, ctx context.Context, app *App) {
+	log.Printf("[DEBUG] Show panel requested: %s", reason)
+	if ctx == nil {
+		log.Printf("[DEBUG] Show panel skipped: nil context (%s)", reason)
+		return
+	}
+	wailsRuntime.WindowUnminimise(ctx)
+	wailsRuntime.WindowShow(ctx)
+	wailsRuntime.WindowCenter(ctx)
+	wailsRuntime.WindowSetAlwaysOnTop(ctx, true)
+	time.Sleep(150 * time.Millisecond)
+	wailsRuntime.WindowSetAlwaysOnTop(ctx, false)
+	app.OnPanelShown()
+	log.Printf("[DEBUG] Show panel complete: %s", reason)
 }
 
 // safeSystray wraps startSysTray with panic recovery.
