@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -185,6 +186,201 @@ func TestStatusEndpointReturnsJSON(t *testing.T) {
 	}
 	if sr.SessionID != 0 {
 		t.Errorf("session_id: got %d, want 0 (not handshaked)", sr.SessionID)
+	}
+}
+
+func newTestClient() *Client {
+	c, _ := NewClient(&Config{
+		Server:   "current.example.com",
+		Username: "u",
+		Password: "p",
+		Port:     10010,
+		MTU:      1436,
+		RouteNet: "192.168.0.0/16",
+	})
+	c.SetTunnelConfig(&OPENACKResult{
+		LocalIP:   "10.0.0.2",
+		GatewayIP: "10.0.0.1",
+	})
+	return c
+}
+
+// authMux wraps newControlMux output with bearerAuth so we can exercise
+// the full auth + handler stack in one request.
+func authMux(c *Client, fn switchServerFunc, token string) http.Handler {
+	return bearerAuth(newControlMux(c, fn), token)
+}
+
+func TestSwitchEndpointRejectsGET(t *testing.T) {
+	c := newTestClient()
+	h := authMux(c, nil, "tok")
+	req := httptest.NewRequest(http.MethodGet, "/v1/switch", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSwitchEndpointRejectsEmptyServer(t *testing.T) {
+	c := newTestClient()
+	h := authMux(c, nil, "tok")
+	body := strings.NewReader(`{"server":""}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/switch", body)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSwitchEndpointRejectsBlankServer(t *testing.T) {
+	c := newTestClient()
+	h := authMux(c, nil, "tok")
+	body := strings.NewReader(`{"server":"   "}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/switch", body)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSwitchEndpointRejectsInvalidJSON(t *testing.T) {
+	c := newTestClient()
+	h := authMux(c, nil, "tok")
+	body := strings.NewReader(`not-json`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/switch", body)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSwitchEndpointAuthRejected(t *testing.T) {
+	c := newTestClient()
+	h := authMux(c, nil, "tok")
+	body := strings.NewReader(`{"server":"test.example.com"}`)
+
+	// No token
+	req := httptest.NewRequest(http.MethodPost, "/v1/switch", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+
+	// Wrong token
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/switch", body)
+	req2.Header.Set("Authorization", "Bearer wrong")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for wrong token, got %d", rec2.Code)
+	}
+}
+
+func TestSwitchEndpointSuccess(t *testing.T) {
+	c := newTestClient()
+	var switchedTo string
+	fn := func(next *Config) (*OPENACKResult, error) {
+		switchedTo = next.Server
+		return &OPENACKResult{
+			LocalIP:   "10.0.0.2",
+			GatewayIP: "10.0.0.1",
+		}, nil
+	}
+	h := authMux(c, fn, "tok")
+
+	body := strings.NewReader(`{"server":"new.example.com"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/switch", body)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if switchedTo != "new.example.com" {
+		t.Fatalf("switch called with %q, expected new.example.com", switchedTo)
+	}
+
+	var resp switchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Status.State != "disconnected" {
+		t.Errorf("status state: got %q", resp.Status.State)
+	}
+	if resp.Tunnel.LocalIP != "10.0.0.2" {
+		t.Errorf("tunnel local_ip: got %q", resp.Tunnel.LocalIP)
+	}
+}
+
+func TestSwitchEndpointError(t *testing.T) {
+	c := newTestClient()
+	fn := func(next *Config) (*OPENACKResult, error) {
+		return nil, fmt.Errorf("handshake \"timeout\"")
+	}
+	h := authMux(c, fn, "tok")
+
+	body := strings.NewReader(`{"server":"bad.example.com"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/switch", body)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var errBody map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("expected valid JSON error response, got %q: %v", rec.Body.String(), err)
+	}
+	if !strings.Contains(errBody["error"], "handshake") {
+		t.Fatalf("unexpected error body: %#v", errBody)
+	}
+}
+
+func TestSwitchEndpointServerOnly(t *testing.T) {
+	// Verify that the switch handler only allows Server to change and
+	// does not propagate other config fields from the request body.
+	c := newTestClient()
+	var received *Config
+	fn := func(next *Config) (*OPENACKResult, error) {
+		received = next
+		return &OPENACKResult{LocalIP: "10.0.0.2", GatewayIP: "10.0.0.1"}, nil
+	}
+	h := authMux(c, fn, "tok")
+
+	// Try to sneak in password/port changes via the JSON body.
+	body := strings.NewReader(`{"server":"evil.com","password":"hacked","port":666}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/switch", body)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if received.Server != "evil.com" {
+		t.Errorf("server: got %q", received.Server)
+	}
+	// Password, port, and username must come from current config, not from
+	// the request body.
+	if received.Password != "p" {
+		t.Errorf("password: got %q, want original value", received.Password)
+	}
+	if received.Port != 10010 {
+		t.Errorf("port: got %d, want 10010", received.Port)
+	}
+	if received.Username != "u" {
+		t.Errorf("username: got %q, want original value", received.Username)
 	}
 }
 

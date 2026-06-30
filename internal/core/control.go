@@ -59,33 +59,101 @@ func bearerAuth(next http.Handler, token string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
-			http.Error(w, `{"error":"missing Bearer token"}`, http.StatusUnauthorized)
+			writeJSONError(w, http.StatusUnauthorized, "missing Bearer token")
 			return
 		}
 		got := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 		if got != token {
-			http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+			writeJSONError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// switchServerFunc abstracts Client.SwitchServer so tests can inject a fake.
+type switchServerFunc func(next *Config) (*OPENACKResult, error)
+
+// switchRequest is the expected JSON body for POST /v1/switch.
+type switchRequest struct {
+	Server string `json:"server"`
+}
+
+// switchResponse is the JSON body returned on a successful switch.
+type switchResponse struct {
+	Status *StatusResult  `json:"status"`
+	Tunnel *OPENACKResult `json:"tunnel,omitempty"`
+}
+
+// newControlMux builds the /v1/* handler tree backed by the given Client and
+// switch function. Tests call this directly with a mock switch; production
+// passes c.SwitchServer.
+func newControlMux(c *Client, switchFn switchServerFunc) http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v1/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(c.Status())
+	})
+
+	mux.HandleFunc("/v1/switch", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		var req switchRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		req.Server = strings.TrimSpace(req.Server)
+		if req.Server == "" {
+			writeJSONError(w, http.StatusBadRequest, "server is required")
+			return
+		}
+
+		// Clone current config, only replacing the server name.
+		cfg := c.currentConfig()
+		if cfg == nil {
+			writeJSONError(w, http.StatusInternalServerError, "no active config")
+			return
+		}
+		nextCfg := cloneConfig(cfg)
+		nextCfg.Server = req.Server
+
+		tun, err := switchFn(nextCfg)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "switch failed: "+err.Error())
+			return
+		}
+
+		resp := switchResponse{
+			Status: c.Status(),
+			Tunnel: tun,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	return mux
+}
+
 // startControlServer binds an HTTP server on addr and serves the /v1/*
 // namespace behind Bearer token authentication.  The returned server must
 // be shut down by the caller.
 func startControlServer(addr string, token string, c *Client) (*http.Server, error) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/status", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-			return
-		}
-		sr := c.Status()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(sr)
-	})
-
+	mux := newControlMux(c, c.SwitchServer)
 	authMux := bearerAuth(mux, token)
 
 	ln, err := net.Listen("tcp", addr)
