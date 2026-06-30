@@ -50,24 +50,34 @@ func NewClient(cfg *Config) (*Client, error) {
 	}, nil
 }
 
-// Connect opens the UDP socket and initialises the Session.
-func (c *Client) Connect() error {
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", c.config.Server, c.config.Port))
+// newSession resolves and dials the UDP server from config, returning a
+// Session with the live connection but without performing a handshake.
+func newSession(cfg *Config) (*Session, error) {
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", cfg.Server, cfg.Port))
 	if err != nil {
-		return fmt.Errorf("resolve server: %w", err)
+		return nil, fmt.Errorf("resolve server: %w", err)
 	}
 
 	conn, err := net.DialUDP("udp", nil, addr)
 	if err != nil {
-		return fmt.Errorf("dial UDP: %w", err)
+		return nil, fmt.Errorf("dial UDP: %w", err)
 	}
 
-	c.session = &Session{
+	return &Session{
 		conn:    conn,
 		server:  addr,
-		pipeID:  uint32(c.config.PipeID),
-		pipeIdx: uint32(c.config.PipeIdx),
+		pipeID:  uint32(cfg.PipeID),
+		pipeIdx: uint32(cfg.PipeIdx),
+	}, nil
+}
+
+// Connect opens the UDP socket and initialises the Session.
+func (c *Client) Connect() error {
+	s, err := newSession(c.config)
+	if err != nil {
+		return err
 	}
+	c.session = s
 	return nil
 }
 
@@ -83,13 +93,25 @@ func (c *Client) SessionID() uint16 {
 // Handshake sends OPEN and waits for OPENACK. Returns the raw OPENACK data.
 // Must be called after Connect.
 func (c *Client) Handshake() ([]byte, error) {
-	s := c.session
-	if s == nil {
+	if c.session == nil {
 		return nil, fmt.Errorf("not connected: call Connect first")
+	}
+	return c.session.Handshake(c.config)
+}
+
+// Handshake sends the OPEN packet over this session's UDP connection and
+// blocks until a valid signed OPENACK arrives. On success the session is
+// populated with the negotiated session id and sequence number.
+//
+// Must be called after dial — callers own the Session lifecycle and must
+// Close the session on error if the session should not be reused.
+func (s *Session) Handshake(cfg *Config) ([]byte, error) {
+	if s == nil || s.conn == nil {
+		return nil, fmt.Errorf("session not connected")
 	}
 
 	// Send OPEN
-	openPkt := BuildOpenPacket(c.config)
+	openPkt := BuildOpenPacket(cfg)
 	log.Println("[AUTH] Sending OPEN...")
 	if _, err := s.conn.Write(openPkt); err != nil {
 		return nil, fmt.Errorf("send OPEN: %w", err)
@@ -256,6 +278,26 @@ func buildDataPacket(sessionID uint16, seq uint32, payload []byte, encrypt int) 
 	copy(pkt[:8], hdr)
 	copy(pkt[8:], payload)
 	return pkt
+}
+
+// connectAndHandshakeSession dials and performs the full SD-WAN handshake
+// in one call. On handshake failure the session is closed to avoid leaking
+// the UDP socket. Callers that need the raw OPENACK payload (e.g. for TUN
+// config) receive it as the second return value.
+//
+// This is purely a convenience helper — the existing one-shot path in
+// RunOnce continues to use Client.Connect + Client.Handshake separately.
+func connectAndHandshakeSession(cfg *Config) (*Session, []byte, error) {
+	s, err := newSession(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	raw, err := s.Handshake(cfg)
+	if err != nil {
+		s.Close()
+		return nil, nil, err
+	}
+	return s, raw, nil
 }
 
 // Close nil-safely and idempotently closes the underlying UDP connection.
