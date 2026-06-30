@@ -176,6 +176,58 @@ func (c *Client) currentConfig() *Config {
 	return cfg
 }
 
+// currentBindHint returns a safe source IP hint for the next UDP dial during
+// server switch. It reuses the current session's source IP only when it is a
+// stable non-tunnel address (never 10.100.100.* and never the current TUN IP).
+func (c *Client) currentBindHint() *net.UDPAddr {
+	s := c.currentSession()
+	if s == nil || s.conn == nil {
+		return nil
+	}
+	cur, ok := s.conn.LocalAddr().(*net.UDPAddr)
+	if !ok || cur == nil || cur.IP == nil {
+		return nil
+	}
+	ip := cur.IP.To4()
+	if ip == nil {
+		return nil
+	}
+	if ip[0] == 10 && ip[1] == 100 && ip[2] == 100 {
+		return nil
+	}
+	old := c.currentTunConfig()
+	if old != nil {
+		if oldIP := net.ParseIP(old.LocalIP); oldIP != nil && oldIP.Equal(cur.IP) {
+			return nil
+		}
+	}
+	return &net.UDPAddr{IP: append(net.IP(nil), cur.IP...), Port: 0}
+}
+
+func (c *Client) validateSwitchSourceBind(s *Session, tunCfg *OPENACKResult) error {
+	if s == nil || s.conn == nil {
+		return nil
+	}
+	addr, ok := s.conn.LocalAddr().(*net.UDPAddr)
+	if !ok || addr == nil || addr.IP == nil {
+		return nil
+	}
+	ip := addr.IP.To4()
+	if ip == nil || !(ip[0] == 10 && ip[1] == 100 && ip[2] == 100) {
+		return nil
+	}
+	newIP := net.ParseIP(tunCfg.LocalIP)
+	old := c.currentTunConfig()
+	var oldIP net.IP
+	if old != nil {
+		oldIP = net.ParseIP(old.LocalIP)
+	}
+	if newIP == nil || !addr.IP.Equal(newIP) || (oldIP != nil && !oldIP.Equal(newIP) && addr.IP.Equal(oldIP)) {
+		return fmt.Errorf("switch: stale source bind %s for tunnel ip %s", addr.IP.String(), tunCfg.LocalIP)
+	}
+	return nil
+}
+
 // StatusResult is a read-only snapshot of the current tunnel state for the
 // control API. All fields are thread-safe snapshots.
 type StatusResult struct {
@@ -223,13 +275,13 @@ func (c *Client) Status() *StatusResult {
 
 // newSession resolves and dials the UDP server from config, returning a
 // Session with the live connection but without performing a handshake.
-func newSession(cfg *Config) (*Session, error) {
+func newSession(cfg *Config, localAddr *net.UDPAddr) (*Session, error) {
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", cfg.Server, cfg.Port))
 	if err != nil {
 		return nil, fmt.Errorf("resolve server: %w", err)
 	}
 
-	conn, err := net.DialUDP("udp", nil, addr)
+	conn, err := net.DialUDP("udp", localAddr, addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial UDP: %w", err)
 	}
@@ -246,7 +298,7 @@ func newSession(cfg *Config) (*Session, error) {
 // Connect opens the UDP socket and initialises the Session.
 // If a session already exists it is closed before the new one is assigned.
 func (c *Client) Connect() error {
-	s, err := newSession(c.config)
+	s, err := newSession(c.config, nil)
 	if err != nil {
 		return err
 	}
@@ -566,8 +618,8 @@ func buildDataPacket(sessionID uint16, seq uint32, payload []byte, encrypt int) 
 //
 // This is purely a convenience helper — the existing one-shot path in
 // RunOnce continues to use Client.Connect + Client.Handshake separately.
-func connectAndHandshakeSession(cfg *Config) (*Session, []byte, error) {
-	s, err := newSession(cfg)
+func connectAndHandshakeSession(cfg *Config, localAddr *net.UDPAddr) (*Session, []byte, error) {
+	s, err := newSession(cfg, localAddr)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -603,7 +655,11 @@ func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
 	}
 
 	// b) connect + handshake
-	newS, raw, err := connectAndHandshakeSession(nextCfg)
+	bindHint := c.currentBindHint()
+	if bindHint != nil {
+		log.Printf("[SWITCH] Binding new session to source=%s", bindHint.IP.String())
+	}
+	newS, raw, err := connectAndHandshakeSession(nextCfg, bindHint)
 	if err != nil {
 		return nil, fmt.Errorf("switch: %w", err)
 	}
@@ -613,6 +669,10 @@ func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
 	if tunCfg.LocalIP == "" || tunCfg.GatewayIP == "" {
 		newS.Close()
 		return nil, fmt.Errorf("switch: OPENACK missing IP info")
+	}
+	if err := c.validateSwitchSourceBind(newS, tunCfg); err != nil {
+		newS.Close()
+		return nil, err
 	}
 
 	// d) check tunnel compatibility
