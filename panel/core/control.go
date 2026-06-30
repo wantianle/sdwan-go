@@ -98,7 +98,7 @@ func isAuthError(err error) bool {
 
 // --- HTTP control client ---
 
-const controlTimeout = 10 * time.Second
+const controlTimeout = 2 * time.Second
 
 func getControlStatus(addr, token string) (*controlStatusResult, error) {
 	url := "http://" + addr + "/v1/status"

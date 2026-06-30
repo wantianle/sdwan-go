@@ -55,6 +55,8 @@ type SdwanManager struct {
 	stopCh          chan struct{} // signals poller / latency probe to stop
 	probeTrigger    chan struct{} // triggers an immediate probe
 	probePaused     atomic.Bool   // true = probes suspended (panel hidden)
+	daemonPollStop  chan struct{}
+	daemonPollerOn  atomic.Bool
 	autoConnecting  atomic.Bool
 	manualChangeSeq atomic.Uint64
 	lastAutoAttempt atomic.Int64
@@ -72,15 +74,16 @@ func GetManager() *SdwanManager {
 		dir := filepath.Dir(exe)
 
 		m := &SdwanManager{
-			exeDir:        dir,
-			configPath:    filepath.Join(dir, "config.json"),
-			iwanPath:      filepath.Join(dir, "iwan.conf"),
-			config:        defaultConfig(),
-			serverLatency: make(map[string]int64),
-			controlAddr:   "127.0.0.1:17890",
-			tokenPath:     filepath.Join(dir, "control.token"),
-			stopCh:        make(chan struct{}),
-			probeTrigger:  make(chan struct{}, 1),
+			exeDir:         dir,
+			configPath:     filepath.Join(dir, "config.json"),
+			iwanPath:       filepath.Join(dir, "iwan.conf"),
+			config:         defaultConfig(),
+			serverLatency:  make(map[string]int64),
+			controlAddr:    "127.0.0.1:17890",
+			tokenPath:      filepath.Join(dir, "control.token"),
+			stopCh:         make(chan struct{}),
+			probeTrigger:   make(chan struct{}, 1),
+			daemonPollStop: make(chan struct{}, 1),
 		}
 		// Generates token on first install so panel and daemon share one.
 		if tok, err := loadOrGenerateToken(m.tokenPath); err == nil {
@@ -138,34 +141,12 @@ func (m *SdwanManager) saveConfig() error {
 	return os.WriteFile(m.configPath, data, 0644)
 }
 
-// GetStatus returns the current connection state, preferring the daemon's
-// control API when available. Snapshot fields under lock, make the HTTP
-// call outside the lock, then reacquire to update m.connected.
+// GetStatus returns the cached connection state. It intentionally avoids
+// synchronous control API calls so frontend polling never blocks the Wails
+// bridge when the daemon is unreachable.
 func (m *SdwanManager) GetStatus() map[string]interface{} {
 	m.mu.Lock()
-	token := m.token
-	controlAddr := m.controlAddr
-	hasDaemonCmd := m.daemonCmd != nil && m.daemonCmd.Process != nil
-	m.mu.Unlock()
-
-	// Refresh connected state from API if we have a token
-	if token != "" {
-		sr, err := getControlStatus(controlAddr, token)
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if err == nil {
-			m.connected = sr.State == "running"
-		} else if !hasDaemonCmd {
-			// API unavailable — only go false if we don't own a process
-			m.connected = false
-		}
-	} else {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if !hasDaemonCmd {
-			m.connected = false
-		}
-	}
+	defer m.mu.Unlock()
 
 	return map[string]interface{}{
 		"connected":      m.connected,
@@ -205,43 +186,38 @@ func (m *SdwanManager) ToggleConnection() bool {
 	token := m.token
 	controlAddr := m.controlAddr
 	serverName := m.getCurrentServerName()
+	cached := m.connected
 	m.mu.Unlock()
 
-	if token == "" {
-		go func() {
-			if ok := m.ensureDaemonRunning(); ok && m.onStateChange != nil {
-				m.onStateChange()
-			}
-		}()
-		return m.isConnected()
-	}
-
-	// Check if the daemon API is reachable.
-	sr, err := getControlStatus(controlAddr, token)
-	if err != nil {
-		// API unreachable — start daemon.
-		go func() {
-			if ok := m.ensureDaemonRunning(); ok && m.onStateChange != nil {
-				m.onStateChange()
-			}
-		}()
-		return m.isConnected()
-	}
-
-	// API reachable — update local connected state.
-	m.mu.Lock()
-	m.connected = sr.State == "running"
-	m.mu.Unlock()
-
-	if sr.State == "running" {
-		return true
-	}
-
-	// Tunnel disconnected — reconnect via /v1/switch.
-	log.Printf("[PANEL] Daemon reachable but tunnel disconnected — reconnecting to %s", serverName)
 	go func() {
-		_, err := postControlSwitch(controlAddr, token, serverName)
+		if token == "" {
+			if ok := m.ensureDaemonRunning(); ok && m.onStateChange != nil {
+				m.onStateChange()
+			}
+			return
+		}
+
+		sr, err := getControlStatus(controlAddr, token)
 		if err != nil {
+			if ok := m.ensureDaemonRunning(); ok && m.onStateChange != nil {
+				m.onStateChange()
+			}
+			return
+		}
+		m.startDaemonPoller()
+
+		if sr.State == "running" {
+			m.mu.Lock()
+			m.connected = true
+			m.mu.Unlock()
+			if m.onStateChange != nil {
+				m.onStateChange()
+			}
+			return
+		}
+
+		log.Printf("[PANEL] Daemon reachable but tunnel disconnected — reconnecting to %s", serverName)
+		if _, err := postControlSwitch(controlAddr, token, serverName); err != nil {
 			log.Printf("[PANEL] Reconnect switch failed: %v", err)
 			m.mu.Lock()
 			m.connected = false
@@ -256,7 +232,7 @@ func (m *SdwanManager) ToggleConnection() bool {
 		}
 	}()
 
-	return m.isConnected()
+	return cached
 }
 
 // SelectServer sets the active server. Prefers the daemon's control API
@@ -289,53 +265,53 @@ func (m *SdwanManager) SelectServer(id string) bool {
 	controlAddr := m.controlAddr
 	m.mu.Unlock()
 
-	// Check if the daemon API is reachable.
-	var sr *controlStatusResult
-	apiReachable := false
-	if token != "" {
-		var err error
-		sr, err = getControlStatus(controlAddr, token)
-		apiReachable = err == nil
-	}
+	go func() {
+		if token != "" {
+			sr, err := getControlStatus(controlAddr, token)
+			if err == nil {
+				m.startDaemonPoller()
+				m.mu.Lock()
+				m.connected = sr.State == "running"
+				m.mu.Unlock()
 
-	if apiReachable {
-		// --- API reachable ---
-		// Update local connected state from the real daemon status.
-		m.mu.Lock()
-		m.connected = sr.State == "running"
-		m.mu.Unlock()
+				// Same server and already running → no-op.
+				if isSameServer && sr.State == "running" {
+					if m.onStateChange != nil {
+						m.onStateChange()
+					}
+					return
+				}
 
-		// Same server and already running → no-op (avoid unnecessary session reset).
-		if isSameServer && sr.State == "running" {
-			return true
-		}
+				log.Printf("[PANEL] Switching daemon to %s", targetName)
+				if _, err := postControlSwitch(controlAddr, token, targetName); err != nil {
+					log.Printf("[PANEL] Daemon switch failed: %v", err)
+					m.mu.Lock()
+					m.connected = false
+					m.mu.Unlock()
+					if m.onStateChange != nil {
+						m.onStateChange()
+					}
+					return
+				}
 
-		// Call switch for reconnection or different-server switch.
-		log.Printf("[PANEL] Switching daemon to %s", targetName)
-		if _, err := postControlSwitch(controlAddr, token, targetName); err != nil {
-			log.Printf("[PANEL] Daemon switch failed: %v", err)
-			m.mu.Lock()
-			m.connected = false
-			m.mu.Unlock()
-			if m.onStateChange != nil {
-				m.onStateChange()
+				m.mu.Lock()
+				m.config.CurrentServer = id
+				m.connected = true
+				m.mu.Unlock()
+				_ = m.saveConfig()
+				if !isSameServer {
+					_ = m.syncIwanConf()
+				}
+				if m.onStateChange != nil {
+					m.onStateChange()
+				}
+				return
 			}
-			return false
 		}
 
-		// Success — persist the new selection.
-		m.mu.Lock()
-		m.config.CurrentServer = id
-		m.connected = true
-		m.mu.Unlock()
-		_ = m.saveConfig()
-		if !isSameServer {
-			_ = m.syncIwanConf()
-		}
-	} else {
 		// --- API unreachable ---
-		// Persist first, then start daemon.
-		// For same-server no-op, only try to ensure daemon.
+		// Persist first, then start daemon. For same-server no-op, only try
+		// to ensure daemon.
 		if !isSameServer {
 			m.mu.Lock()
 			m.config.CurrentServer = id
@@ -343,12 +319,11 @@ func (m *SdwanManager) SelectServer(id string) bool {
 			_ = m.saveConfig()
 			_ = m.syncIwanConf()
 		}
-		go m.ensureDaemonRunning()
-	}
+		if ok := m.ensureDaemonRunning(); ok && m.onStateChange != nil {
+			m.onStateChange()
+		}
+	}()
 
-	if m.onStateChange != nil {
-		m.onStateChange()
-	}
 	return true
 }
 
@@ -453,6 +428,10 @@ func (m *SdwanManager) Shutdown() {
 
 	select {
 	case m.stopCh <- struct{}{}:
+	default:
+	}
+	select {
+	case m.daemonPollStop <- struct{}{}:
 	default:
 	}
 
@@ -659,6 +638,7 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 				m.connected = true
 				m.daemonStarting = false
 				m.mu.Unlock()
+				m.startDaemonPoller()
 				return true
 			}
 			// API reachable but tunnel disconnected — daemon process is alive,
@@ -667,6 +647,7 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 			m.connected = false
 			m.daemonStarting = false
 			m.mu.Unlock()
+			m.startDaemonPoller()
 			return false
 		}
 		// If API returned 401, the token is wrong → don't start a daemon
@@ -728,11 +709,63 @@ func (m *SdwanManager) pollDaemonReady(token, controlAddr string) bool {
 			m.connected = true
 			m.daemonStarting = false
 			m.mu.Unlock()
+			m.startDaemonPoller()
 			return true
 		}
 	}
 	log.Println("[DAEMON] Daemon did not become ready in time")
 	return false
+}
+
+// startDaemonPoller keeps cached daemon state fresh in the background so
+// Wails-facing methods can return immediately without synchronous HTTP calls.
+func (m *SdwanManager) startDaemonPoller() {
+	if !m.daemonPollerOn.CompareAndSwap(false, true) {
+		return
+	}
+
+	go func() {
+		defer m.daemonPollerOn.Store(false)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		m.pollDaemonStatusOnce()
+		for {
+			select {
+			case <-m.daemonPollStop:
+				return
+			case <-ticker.C:
+				m.pollDaemonStatusOnce()
+			}
+		}
+	}()
+}
+
+func (m *SdwanManager) pollDaemonStatusOnce() {
+	m.mu.Lock()
+	token := m.token
+	controlAddr := m.controlAddr
+	hasDaemonCmd := m.daemonCmd != nil && m.daemonCmd.Process != nil
+	wasConnected := m.connected
+	m.mu.Unlock()
+
+	if token == "" {
+		return
+	}
+	sr, err := getControlStatus(controlAddr, token)
+
+	m.mu.Lock()
+	if err == nil {
+		m.connected = sr.State == "running"
+	} else if !hasDaemonCmd {
+		m.connected = false
+	}
+	changed := wasConnected != m.connected
+	m.mu.Unlock()
+
+	if changed && m.onStateChange != nil {
+		m.onStateChange()
+	}
 }
 
 // --- latency probe ---------------------------------------------------
