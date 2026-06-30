@@ -300,7 +300,7 @@ func (c *Client) Start() error {
 }
 
 // startPacketPumpOnce launches the adapter-lifetime TUN→server goroutine
-// exactly once. Safe to call from every Run() invocation.
+// exactly once. Safe to call from Run, Start, and SwitchServer paths.
 func (c *Client) startPacketPumpOnce() {
 	c.packetPumpOnce.Do(func() {
 		go c.tunToServer()

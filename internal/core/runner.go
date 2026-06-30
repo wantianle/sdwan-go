@@ -105,6 +105,101 @@ func RunOnce(configPath string) error {
 	return nil
 }
 
+// ControlOptions holds daemon-mode settings (HTTP control API not wired yet).
+type ControlOptions struct {
+	Addr      string // control listen address, e.g. "127.0.0.1:17890"
+	TokenFile string // optional path to a static token file
+}
+
+// RunDaemon performs the same initial setup as RunOnce (config, UDP connect,
+// handshake, TUN, routes) but calls client.Start() instead of blocking on
+// client.Run(). It then waits for SIGINT/SIGTERM, cleans up, and returns.
+//
+// The control API server is not implemented yet; the daemon simply stays
+// alive so future control clients can attach once the HTTP server is added.
+func RunDaemon(configPath string, opts ControlOptions) error {
+	// 1. Load config
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+
+	log.Printf("[INFO] Server=%s Port=%d User=%s MTU=%d Encrypt=%d",
+		cfg.Server, cfg.Port, cfg.Username, cfg.MTU, cfg.Encrypt)
+
+	// 2. Create client
+	client, err := NewClient(cfg)
+	if err != nil {
+		return fmt.Errorf("create client: %w", err)
+	}
+	defer client.Close()
+
+	// 3. Connect to server
+	if err := client.Connect(); err != nil {
+		return fmt.Errorf("UDP connect: %w", err)
+	}
+	log.Printf("[INFO] UDP connected to %s:%d", cfg.Server, cfg.Port)
+
+	// 4. Handshake
+	log.Println("[AUTH] Waiting for OPENACK...")
+	openAck, err := client.Handshake()
+	if err != nil {
+		return fmt.Errorf("handshake: %w", err)
+	}
+	log.Println("[AUTH] Authenticated successfully")
+
+	// Parse TUN configuration from OPENACK
+	tunCfg := ParseOPENACK(openAck)
+	if tunCfg.LocalIP == "" || tunCfg.GatewayIP == "" {
+		return fmt.Errorf("OPENACK missing IP info: local=%q gateway=%q",
+			tunCfg.LocalIP, tunCfg.GatewayIP)
+	}
+	log.Printf("[TUN] Local IP=%s Gateway=%s DNS=%s MTU=%d",
+		tunCfg.LocalIP, tunCfg.GatewayIP, tunCfg.DNSIP, tunCfg.MTU)
+
+	// Store baseline TUN config so SwitchServer can validate compatibility.
+	client.SetTunnelConfig(tunCfg)
+
+	// Override config MTU if server sent one
+	if tunCfg.MTU > 0 {
+		cfg.MTU = int(tunCfg.MTU)
+	}
+
+	// 5. Create TUN, assign IP, add route (with retry + cleanup wiring)
+	tunName, tunCleanup, err := setupTUN(cfg, tunCfg, client)
+	if err != nil {
+		return err
+	}
+	defer tunCleanup()
+
+	// 6. Start daemon loops (non-blocking via client.Start)
+	if err := client.Start(); err != nil {
+		return fmt.Errorf("daemon start: %w", err)
+	}
+
+	// 7. Signal handling
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	// 8. Show status
+	fmt.Println()
+	log.Println("[STATUS] SDWAN daemon running")
+	log.Printf("  Control: %s", opts.Addr)
+	log.Printf("  Server:  %s:%d", cfg.Server, cfg.Port)
+	log.Printf("  User:    %s", cfg.Username)
+	log.Printf("  Session: %d", client.SessionID())
+	log.Printf("  TUN:     %s", tunName)
+	log.Printf("  Route:   %s -> %s", cfg.RouteNet, tunName)
+	fmt.Println()
+
+	// 9. Wait for shutdown signal
+	sig := <-sigCh
+	log.Printf("[INFO] Received signal %v, shutting down...", sig)
+	log.Println("[INFO] Daemon shutdown complete")
+	return nil
+}
+
 // setupTUN creates the TUN adapter, assigns the server-assigned IP,
 // and adds the route with retry. Returns the adapter name and a cleanup
 // function that caller must defer (DelRoute + CloseTUN).
