@@ -201,7 +201,46 @@ func (c *Client) currentBindHint() *net.UDPAddr {
 			return nil
 		}
 	}
+	if !isLocalPhysicalIP(cur.IP) {
+		return nil
+	}
 	return &net.UDPAddr{IP: append(net.IP(nil), cur.IP...), Port: 0}
+}
+
+func isLocalPhysicalIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	want := ip.To4()
+	if want == nil {
+		want = ip
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return true
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var got net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				got = v.IP
+			case *net.IPAddr:
+				got = v.IP
+			}
+			if got != nil && got.Equal(want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c *Client) validateSwitchSourceBind(s *Session, tunCfg *OPENACKResult) error {
@@ -276,7 +315,7 @@ func (c *Client) Status() *StatusResult {
 // newSession resolves and dials the UDP server from config, returning a
 // Session with the live connection but without performing a handshake.
 func newSession(cfg *Config, localAddr *net.UDPAddr) (*Session, error) {
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", cfg.Server, cfg.Port))
+	addr, err := resolveUDPAddrWithRetry(cfg.Server, cfg.Port)
 	if err != nil {
 		return nil, fmt.Errorf("resolve server: %w", err)
 	}
@@ -293,6 +332,25 @@ func newSession(cfg *Config, localAddr *net.UDPAddr) (*Session, error) {
 		pipeIdx: uint32(cfg.PipeIdx),
 		done:    make(chan struct{}),
 	}, nil
+}
+
+func resolveUDPAddrWithRetry(host string, port int) (*net.UDPAddr, error) {
+	var lastErr error
+	backoffs := []time.Duration{0, 500 * time.Millisecond, time.Second}
+	for i, backoff := range backoffs {
+		if backoff > 0 {
+			time.Sleep(backoff)
+		}
+		addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", host, port))
+		if err == nil {
+			return addr, nil
+		}
+		lastErr = err
+		if i < len(backoffs)-1 {
+			log.Printf("[DNS] Resolve %s:%d failed, retrying: %v", host, port, err)
+		}
+	}
+	return nil, lastErr
 }
 
 // Connect opens the UDP socket and initialises the Session.
@@ -660,6 +718,10 @@ func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
 		log.Printf("[SWITCH] Binding new session to source=%s", bindHint.IP.String())
 	}
 	newS, raw, err := connectAndHandshakeSession(nextCfg, bindHint)
+	if err != nil && bindHint != nil {
+		log.Printf("[SWITCH] Bind-hinted session failed (%v); retrying without source bind", err)
+		newS, raw, err = connectAndHandshakeSession(nextCfg, nil)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("switch: %w", err)
 	}
