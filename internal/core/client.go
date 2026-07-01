@@ -49,6 +49,7 @@ type Client struct {
 	packetPumpOnce   sync.Once // ensures tunToServer goroutine is launched once
 	reconnectStarted atomic.Bool
 	reconnecting     atomic.Bool
+	paused           atomic.Bool
 	switchMu         sync.Mutex // serializes SwitchServer calls
 }
 
@@ -304,6 +305,8 @@ func (c *Client) Status() *StatusResult {
 	if c.session != nil && c.session.id != 0 {
 		sr.State = "running"
 		sr.SessionID = c.session.id
+	} else if c.paused.Load() {
+		sr.State = "paused"
 	} else if c.reconnecting.Load() {
 		sr.State = "reconnecting"
 	}
@@ -499,6 +502,28 @@ func (c *Client) Start() error {
 	return nil
 }
 
+func (c *Client) SetPaused(paused bool) {
+	c.paused.Store(paused)
+	if paused {
+		c.reconnecting.Store(false)
+		old := c.setSession(nil)
+		if old != nil {
+			old.Close()
+		}
+		return
+	}
+	if c.currentSession() == nil && !c.isStopped() {
+		select {
+		case c.reconnectCh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (c *Client) Paused() bool {
+	return c.paused.Load()
+}
+
 func (c *Client) startReconnect() {
 	if !c.reconnectStarted.CompareAndSwap(false, true) {
 		return
@@ -514,6 +539,10 @@ func (c *Client) reconnectLoop() {
 			c.reconnecting.Store(false)
 			return
 		case <-c.reconnectCh:
+			if c.paused.Load() {
+				c.reconnecting.Store(false)
+				continue
+			}
 			c.reconnecting.Store(true)
 		}
 
@@ -527,6 +556,10 @@ func (c *Client) reconnectLoop() {
 
 			if c.currentSession() != nil {
 				backoff = 500 * time.Millisecond
+				c.reconnecting.Store(false)
+				break
+			}
+			if c.paused.Load() {
 				c.reconnecting.Store(false)
 				break
 			}
@@ -557,6 +590,10 @@ func (c *Client) reconnectLoop() {
 
 			if c.currentSession() != nil {
 				backoff = 500 * time.Millisecond
+				c.reconnecting.Store(false)
+				break
+			}
+			if c.paused.Load() {
 				c.reconnecting.Store(false)
 				break
 			}
@@ -662,7 +699,7 @@ func (c *Client) failSession(s *Session, reason error) {
 	c.mu.Unlock()
 	log.Printf("[SESSION] Failing session %d: %v", s.id, reason)
 	s.Close()
-	if wasCurrent && !stopped {
+	if wasCurrent && !stopped && !c.paused.Load() {
 		select {
 		case c.reconnectCh <- struct{}{}:
 		default:
@@ -803,6 +840,7 @@ func connectAndHandshakeSession(cfg *Config, localAddr *net.UDPAddr) (*Session, 
 // returned. On failure the new session is closed and an error is returned;
 // the existing session is left untouched.
 func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
+	c.paused.Store(false)
 	if !c.switchMu.TryLock() {
 		return nil, fmt.Errorf("switch already in progress")
 	}

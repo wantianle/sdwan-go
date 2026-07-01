@@ -91,6 +91,15 @@ type SwitchResponse struct {
 	Tunnel *OPENACKResult `json:"tunnel,omitempty"`
 }
 
+type pauseRequest struct {
+	Pause bool `json:"pause"`
+}
+
+type PauseResponse struct {
+	Status *StatusResult `json:"status"`
+	Paused bool          `json:"paused"`
+}
+
 // newControlMux builds the /v1/* handler tree backed by the given Client and
 // switch function. Tests call this directly with a mock switch; production
 // passes c.SwitchServer.
@@ -146,6 +155,21 @@ func newControlMux(c *Client, switchFn switchServerFunc, shutdownCh chan<- struc
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
+	})
+
+	mux.HandleFunc("/v1/pause", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var req pauseRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		c.SetPaused(req.Pause)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(PauseResponse{Status: c.Status(), Paused: c.Paused()})
 	})
 
 	mux.HandleFunc("/v1/shutdown", func(w http.ResponseWriter, r *http.Request) {

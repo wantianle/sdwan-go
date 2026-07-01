@@ -130,6 +130,13 @@ func postControlSwitch(addr, token, server string) (*controlSwitchResponse, erro
 	return &resp, nil
 }
 
+func postControlPause(addr, token string, pause bool) error {
+	url := "http://" + addr + "/v1/pause"
+	reqBody, _ := json.Marshal(map[string]bool{"pause": pause})
+	_, err := controlRequest(http.MethodPost, url, token, bytes.NewReader(reqBody), controlTimeoutAction)
+	return err
+}
+
 // postControlShutdown sends a graceful shutdown request to the daemon.
 func postControlShutdown(addr, token string) error {
 	url := "http://" + addr + "/v1/shutdown"

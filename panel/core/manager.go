@@ -188,13 +188,31 @@ func (m *SdwanManager) ToggleConnection() bool {
 	m.mu.Lock()
 	token := m.token
 	controlAddr := m.controlAddr
-	serverName := m.getCurrentServerName()
+	state := m.state
 	cached := m.connected
 	m.mu.Unlock()
 
 	go func() {
 		if token == "" {
 			if ok := m.ensureDaemonRunning(); ok && m.onStateChange != nil {
+				m.onStateChange()
+			}
+			return
+		}
+
+		if state == "running" || state == "reconnecting" {
+			if err := postControlPause(controlAddr, token, true); err != nil {
+				log.Printf("[PANEL] Pause failed: %v", err)
+				if m.onStateChange != nil {
+					m.onStateChange()
+				}
+				return
+			}
+			m.mu.Lock()
+			m.state = "paused"
+			m.connected = false
+			m.mu.Unlock()
+			if m.onStateChange != nil {
 				m.onStateChange()
 			}
 			return
@@ -224,17 +242,17 @@ func (m *SdwanManager) ToggleConnection() bool {
 		m.connected = false
 		m.mu.Unlock()
 
-		log.Printf("[PANEL] Daemon reachable but tunnel disconnected — reconnecting to %s", serverName)
-		if _, err := postControlSwitch(controlAddr, token, serverName); err != nil {
-			log.Printf("[PANEL] Reconnect switch failed: %v", err)
+		log.Println("[PANEL] Triggering daemon reconnect")
+		if err := postControlPause(controlAddr, token, false); err != nil {
+			log.Printf("[PANEL] Resume failed: %v", err)
 			m.mu.Lock()
 			m.state = "disconnected"
 			m.connected = false
 			m.mu.Unlock()
 		} else {
 			m.mu.Lock()
-			m.state = "running"
-			m.connected = true
+			m.state = "reconnecting"
+			m.connected = false
 			m.mu.Unlock()
 		}
 		if m.onStateChange != nil {

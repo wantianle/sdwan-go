@@ -106,6 +106,9 @@ function updateConnectionUI(connected, state) {
     statusDot.classList.add('reconnecting');
     statusLabel.textContent = '重新连接中...';
     toggleInput.checked = false;
+  } else if (state === 'paused') {
+    statusLabel.textContent = '已暂停';
+    toggleInput.checked = false;
   } else {
     statusLabel.textContent = '已断开';
     toggleInput.checked = false;
