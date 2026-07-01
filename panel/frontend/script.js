@@ -105,7 +105,7 @@ function updateConnectionUI(connected, state) {
   } else if (state === 'reconnecting') {
     statusDot.classList.add('reconnecting');
     statusLabel.textContent = '重新连接中...';
-    toggleInput.checked = true;
+    toggleInput.checked = false;
   } else {
     statusLabel.textContent = '已断开';
     toggleInput.checked = false;
@@ -144,13 +144,9 @@ function renderServerItem(s, latText) {
     lat.textContent = '切换中...';
     window.go.main.App.SelectServer(s.id).then(ok => {
       if (ok) {
+        switchingServerId = '';
         refreshStatus();
         refreshServers();
-        setTimeout(() => {
-          switchingServerId = '';
-          refreshStatus();
-          refreshServers();
-        }, 800);
       } else {
         switchingServerId = '';
         refreshServers();

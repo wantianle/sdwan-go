@@ -8,7 +8,7 @@ set -euo pipefail
 # One-liner:
 #   curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/scripts/install.sh | sudo bash
 # Specific version:
-#   curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/scripts/install.sh | sudo bash -s -- -v v1.0.29
+#   curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/scripts/install.sh | sudo bash -s -- 1.0.29
 # ────────────────────────────────────────────────────────────
 
 REPO_OWNER="wantianle"
@@ -33,6 +33,7 @@ Options:
 
 Examples:
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/scripts/install.sh | sudo bash
+  curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/scripts/install.sh | sudo bash -s -- 1.0.29
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/scripts/install.sh | sudo bash -s -- -v v1.0.29
 EOF
 }
@@ -49,13 +50,29 @@ parse_args() {
                 usage
                 exit 0
                 ;;
-            *)
+            latest|LATEST)
+                VERSION="latest"
+                shift
+                ;;
+            -*)
                 echo "Unknown option: $1" >&2
                 usage >&2
                 exit 1
                 ;;
+            *)
+                VERSION="$1"
+                shift
+                ;;
         esac
     done
+
+    local version_lower
+    version_lower=$(printf '%s' "$VERSION" | tr '[:upper:]' '[:lower:]')
+    if [[ "$version_lower" == "latest" ]]; then
+        VERSION="latest"
+    else
+        VERSION="v${VERSION#[vV]}"
+    fi
 }
 
 # ────────────────────────────────────────────────────────────

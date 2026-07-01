@@ -3,7 +3,8 @@
 param([string]$Version = "latest")
 
 # Usage:
-#   Saved script: .\install.ps1 -Version v1.0.29
+#   Saved script: .\install.ps1 1.0.29
+#   Saved script: .\install.ps1 v1.0.29
 #   Remote scriptblock: & ([scriptblock]::Create((irm https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.ps1))) -Version v1.0.29
 
 $ErrorActionPreference = "Continue"
@@ -18,6 +19,12 @@ $DOWNLOAD_CONNECT_TIMEOUT_MS = 15000
 $DOWNLOAD_READ_TIMEOUT_MS = 15000
 $DOWNLOAD_OVERALL_TIMEOUT_SEC = 90
 $DOWNLOAD_BUFFER_SIZE = 65536
+
+if ($Version.ToLower() -eq "latest") {
+    $Version = "latest"
+} else {
+    $Version = "v" + $Version.TrimStart("v", "V")
+}
 
 Write-Host ""
 Write-Host "===========================================" -ForegroundColor Cyan
