@@ -275,69 +275,67 @@ func (m *SdwanManager) SelectServer(id string) bool {
 	controlAddr := m.controlAddr
 	m.mu.Unlock()
 
-	go func() {
-		if token != "" {
-			sr, err := getControlStatus(controlAddr, token)
-			if err == nil {
-				m.startDaemonPoller()
-				m.mu.Lock()
-				m.state = sr.State
-				m.connected = sr.State == "running"
-				m.mu.Unlock()
+	if token != "" {
+		sr, err := getControlStatus(controlAddr, token)
+		if err == nil {
+			m.startDaemonPoller()
+			m.mu.Lock()
+			m.state = sr.State
+			m.connected = sr.State == "running"
+			m.mu.Unlock()
 
-				// Same server and already running → no-op.
-				if isSameServer && sr.State == "running" {
-					if m.onStateChange != nil {
-						m.onStateChange()
-					}
-					return
-				}
-
-				log.Printf("[PANEL] Switching daemon to %s", targetName)
-				if _, err := postControlSwitch(controlAddr, token, targetName); err != nil {
-					log.Printf("[PANEL] Daemon switch failed: %v", err)
-					m.mu.Lock()
-					m.state = "disconnected"
-					m.connected = false
-					m.mu.Unlock()
-					if m.onStateChange != nil {
-						m.onStateChange()
-					}
-					return
-				}
-
-				m.mu.Lock()
-				m.config.CurrentServer = id
-				m.state = "running"
-				m.connected = true
-				m.mu.Unlock()
-				_ = m.saveConfig()
-				if !isSameServer {
-					_ = m.syncIwanConf()
-				}
+			// Same server and already running → no-op.
+			if isSameServer && sr.State == "running" {
 				if m.onStateChange != nil {
 					m.onStateChange()
 				}
-				return
+				return true
 			}
-		}
 
-		// --- API unreachable ---
-		// Persist first, then start daemon. For same-server no-op, only try
-		// to ensure daemon.
-		if !isSameServer {
+			log.Printf("[PANEL] Switching daemon to %s", targetName)
+			if _, err := postControlSwitch(controlAddr, token, targetName); err != nil {
+				log.Printf("[PANEL] Daemon switch failed: %v", err)
+				m.mu.Lock()
+				m.state = "disconnected"
+				m.connected = false
+				m.mu.Unlock()
+				if m.onStateChange != nil {
+					m.onStateChange()
+				}
+				return false
+			}
+
 			m.mu.Lock()
 			m.config.CurrentServer = id
+			m.state = "running"
+			m.connected = true
 			m.mu.Unlock()
 			_ = m.saveConfig()
-			_ = m.syncIwanConf()
+			if !isSameServer {
+				_ = m.syncIwanConf()
+			}
+			if m.onStateChange != nil {
+				m.onStateChange()
+			}
+			return true
 		}
-		if ok := m.ensureDaemonRunning(); ok && m.onStateChange != nil {
-			m.onStateChange()
-		}
-	}()
+	}
 
-	return true
+	// --- API unreachable ---
+	// Persist first, then start daemon. For same-server no-op, only try
+	// to ensure daemon.
+	if !isSameServer {
+		m.mu.Lock()
+		m.config.CurrentServer = id
+		m.mu.Unlock()
+		_ = m.saveConfig()
+		_ = m.syncIwanConf()
+	}
+	ok := m.ensureDaemonRunning()
+	if m.onStateChange != nil {
+		m.onStateChange()
+	}
+	return ok
 }
 
 // Reload re-reads config.json.
