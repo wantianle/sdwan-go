@@ -142,6 +142,26 @@ func runWindowsCleanup(label, name string, args ...string) {
 // getTunIndex finds the Windows interface index for the given adapter name.
 func getTunIndex(ifaceName string) (string, error) {
 	log.Printf("[WINTUN] Looking up interface index for %q", ifaceName)
+
+	// Prefer the IPv4 interface Idx from netsh. This is the index expected by
+	// route.exe "IF <idx>" and may differ from Win32_NetworkAdapter.Index.
+	if out, err := exec.Command("netsh", "interface", "ipv4", "show", "interfaces").Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(strings.TrimSpace(line))
+			if len(fields) < 5 || !allDigits(fields[0]) {
+				continue
+			}
+			name := strings.Join(fields[4:], " ")
+			if strings.EqualFold(strings.TrimSpace(name), ifaceName) {
+				log.Printf("[WINTUN] Found interface index=%s via netsh ipv4", fields[0])
+				return fields[0], nil
+			}
+		}
+		log.Printf("[WINTUN] netsh ipv4 interface list did not contain %q", ifaceName)
+	} else {
+		log.Printf("[WINTUN] netsh ipv4 interface query failed: %v", err)
+	}
+
 	// Try NetConnectionID (the internal adapter name)
 	for _, field := range []string{"NetConnectionID", "Name"} {
 		out, err := exec.Command("wmic", "nic",
@@ -155,7 +175,7 @@ func getTunIndex(ifaceName string) (string, error) {
 		if len(lines) >= 2 {
 			idx := strings.TrimSpace(lines[1])
 			if idx != "" {
-				log.Printf("[WINTUN] Found interface index=%s via %s", idx, field)
+				log.Printf("[WINTUN] Found fallback adapter index=%s via wmic %s (may differ from route IF index)", idx, field)
 				return idx, nil
 			}
 		}
@@ -164,6 +184,18 @@ func getTunIndex(ifaceName string) (string, error) {
 	out, _ := exec.Command("wmic", "nic", "get", "Index,Name,NetConnectionID").Output()
 	log.Printf("[WINTUN] Available NICs:\n%s", string(out))
 	return "", fmt.Errorf("tun interface %q not found via wmic", ifaceName)
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // AddRoute adds an on-link route (gateway 0.0.0.0) through the TUN interface.

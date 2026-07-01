@@ -253,9 +253,12 @@ func setupTUN(cfg *Config, tunCfg *OPENACKResult, client *Client) (tunName strin
 		time.Sleep(3 * time.Second)
 		if err := AddRoute(cfg.RouteNet, tunName, routeGW); err != nil {
 			log.Printf("[WARN] Route still failed: %v", err)
+		} else {
+			log.Printf("[ROUTE] Added %s -> %s", cfg.RouteNet, tunName)
 		}
+	} else {
+		log.Printf("[ROUTE] Added %s -> %s", cfg.RouteNet, tunName)
 	}
-	log.Printf("[ROUTE] Added %s -> %s", cfg.RouteNet, cfg.TUNName)
 
 	cleanup = func() {
 		DelRoute(cfg.RouteNet, tunName, routeGW)
