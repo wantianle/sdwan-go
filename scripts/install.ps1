@@ -218,6 +218,17 @@ try {
     }
 }
 
+# Download tray icon for Start Menu shortcut
+$trayIconPath = "$INSTALL_DIR\tray.ico"
+if (-not (Test-Path $trayIconPath)) {
+    $repoRawUrl = "https://raw.githubusercontent.com/wantianle/sdwan-go/master"
+    try {
+        Download-File -Urls @("$repoRawUrl/panel/frontend/tray.ico") -Dest $trayIconPath
+    } catch {
+        Write-Host "  tray.ico download failed, shortcut will use panel.exe icon fallback" -ForegroundColor Yellow
+    }
+}
+
 # ────────────────────────────────────────────────────────────
 # 3. Server selection
 # ────────────────────────────────────────────────────────────
@@ -306,10 +317,18 @@ Write-Host "[5/5] Auto-start & launch" -ForegroundColor Cyan
 $autoStart = Read-Host "  Enable auto-start? (y/n, default y)"
 if ($autoStart -ne "n") {
     $taskName = "SDWAN Panel"
-    schtasks /create /tn $taskName `
-        /tr "$INSTALL_DIR\panel.exe" `
-        /sc onstart /ru SYSTEM /rl highest /f 2>&1 | Out-Null
-    Write-Host "  Auto-start task created: $taskName" -ForegroundColor Green
+    Write-Host "  Creating auto-start task..." -ForegroundColor Cyan
+    schtasks /create /tn $taskName /tr "`"$INSTALL_DIR\panel.exe`"" /sc onlogon /rl highest /f
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  Auto-start task creation failed (exit code $LASTEXITCODE)" -ForegroundColor Red
+    } else {
+        schtasks /query /tn $taskName 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  Auto-start task created: $taskName" -ForegroundColor Green
+        } else {
+            Write-Host "  Auto-start task verification failed" -ForegroundColor Yellow
+        }
+    }
 }
 
 try {
@@ -317,7 +336,12 @@ try {
     $shortcut = $shell.CreateShortcut($SHORTCUT_PATH)
     $shortcut.TargetPath = "$INSTALL_DIR\panel.exe"
     $shortcut.WorkingDirectory = $INSTALL_DIR
-    $shortcut.IconLocation = "$INSTALL_DIR\panel.exe,0"
+    $iconPath = "$INSTALL_DIR\tray.ico"
+    if (Test-Path $iconPath) {
+        $shortcut.IconLocation = $iconPath
+    } else {
+        $shortcut.IconLocation = "$INSTALL_DIR\panel.exe,0"
+    }
     $shortcut.Description = "SDWAN Panel"
     $shortcut.Save()
     Write-Host "  Start Menu shortcut created: $SHORTCUT_PATH" -ForegroundColor Green

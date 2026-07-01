@@ -47,7 +47,7 @@ body {
   display: flex;
   justify-content: flex-end;
   align-items: center;
-  min-height: 18px;
+  min-height: 28px;
   margin: -2px -2px 0;
   -webkit-app-region: drag;
   --wails-draggable: drag;
@@ -89,7 +89,8 @@ body {
   --wails-draggable: drag;
 }
 
-.status-header > * {
+.status-header .toggle-switch,
+.status-header .toggle-switch * {
   -webkit-app-region: no-drag;
   --wails-draggable: no-drag;
 }
