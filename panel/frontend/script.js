@@ -58,6 +58,7 @@ function refreshStatus() {
 }
 
 function refreshServers() {
+  if (switchingServerId) return;
   window.go.main.App.GetServers().then(servers => {
     serverListEl.innerHTML = '';
     servers.forEach(s => {
@@ -145,7 +146,15 @@ function renderServerItem(s, latText) {
     switchingServerId = s.id;
     item.classList.add('switching');
     lat.textContent = '切换中...';
+    const switchingId = s.id;
+    const safetyTimer = setTimeout(() => {
+      if (switchingServerId === switchingId) {
+        switchingServerId = '';
+        refreshServers();
+      }
+    }, 30000);
     window.go.main.App.SelectServer(s.id).then(ok => {
+      clearTimeout(safetyTimer);
       if (ok) {
         switchingServerId = '';
         refreshStatus();
@@ -155,6 +164,7 @@ function renderServerItem(s, latText) {
         refreshServers();
       }
     }).catch(() => {
+      clearTimeout(safetyTimer);
       switchingServerId = '';
       refreshServers();
     });

@@ -40,6 +40,7 @@ type Client struct {
 	mu               sync.RWMutex // protects session/config/tunConfig swaps
 	config           *Config
 	tunConfig        *OPENACKResult // baseline TUN config from initial handshake
+	lastBindHint     *net.UDPAddr
 	TUN              TunDevice
 	session          *Session
 	stopCh           chan struct{}
@@ -190,35 +191,59 @@ func (c *Client) currentConfig() *Config {
 	return cfg
 }
 
+func copyUDPAddr(a *net.UDPAddr) *net.UDPAddr {
+	if a == nil {
+		return nil
+	}
+	return &net.UDPAddr{IP: append(net.IP(nil), a.IP...), Port: a.Port, Zone: a.Zone}
+}
+
+func (c *Client) storeLastBindHint(a *net.UDPAddr) {
+	c.mu.Lock()
+	c.lastBindHint = copyUDPAddr(a)
+	c.mu.Unlock()
+}
+
 // currentBindHint returns a safe source IP hint for the next UDP dial during
 // server switch. It reuses the current session's source IP only when it is a
 // stable non-tunnel address (never 10.100.100.* and never the current TUN IP).
 func (c *Client) currentBindHint() *net.UDPAddr {
 	s := c.currentSession()
-	if s == nil || s.conn == nil {
+	if s != nil && s.conn != nil {
+		if cur, ok := s.conn.LocalAddr().(*net.UDPAddr); ok {
+			if hint := c.validBindHint(cur); hint != nil {
+				return hint
+			}
+		}
+	}
+	c.mu.RLock()
+	saved := copyUDPAddr(c.lastBindHint)
+	c.mu.RUnlock()
+	if hint := c.validBindHint(saved); hint != nil {
+		log.Printf("[SWITCH] Using saved source bind hint %s", hint.IP.String())
+		return hint
+	}
+	return nil
+}
+
+func (c *Client) validBindHint(addr *net.UDPAddr) *net.UDPAddr {
+	if addr == nil || addr.IP == nil {
 		return nil
 	}
-	cur, ok := s.conn.LocalAddr().(*net.UDPAddr)
-	if !ok || cur == nil || cur.IP == nil {
-		return nil
-	}
-	ip := cur.IP.To4()
-	if ip == nil {
-		return nil
-	}
-	if ip[0] == 10 && ip[1] == 100 && ip[2] == 100 {
+	ip := addr.IP.To4()
+	if ip == nil || (ip[0] == 10 && ip[1] == 100 && ip[2] == 100) {
 		return nil
 	}
 	old := c.currentTunConfig()
 	if old != nil {
-		if oldIP := net.ParseIP(old.LocalIP); oldIP != nil && oldIP.Equal(cur.IP) {
+		if oldIP := net.ParseIP(old.LocalIP); oldIP != nil && oldIP.Equal(addr.IP) {
 			return nil
 		}
 	}
-	if !isLocalPhysicalIP(cur.IP) {
+	if !isLocalPhysicalIP(addr.IP) {
 		return nil
 	}
-	return &net.UDPAddr{IP: append(net.IP(nil), cur.IP...), Port: 0}
+	return &net.UDPAddr{IP: append(net.IP(nil), addr.IP...), Port: 0}
 }
 
 func isLocalPhysicalIP(ip net.IP) bool {
@@ -506,6 +531,9 @@ func (c *Client) SetPaused(paused bool) {
 	c.paused.Store(paused)
 	if paused {
 		c.reconnecting.Store(false)
+		if hint := c.currentBindHint(); hint != nil {
+			c.storeLastBindHint(hint)
+		}
 		old := c.setSession(nil)
 		if old != nil {
 			old.Close()

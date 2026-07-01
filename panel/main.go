@@ -43,8 +43,6 @@ func main() {
 	log.Println("SDWAN Panel starting...")
 	log.Println("[DEBUG] Panel version 1.0.0")
 
-	go safeSystray()
-
 	// Show-panel signal watcher — positions panel at screen center
 	go func() {
 		for range trayShowCh {
@@ -68,6 +66,13 @@ func main() {
 		Height:      panelHeight,
 		Frameless:   true,
 		StartHidden: true,
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId: "sdwan-panel",
+			OnSecondInstanceLaunch: func(data options.SecondInstanceData) {
+				log.Println("[DEBUG] Second panel instance requested; showing existing window")
+				go showPanel("second instance", appCtx, app)
+			},
+		},
 
 		AssetServer: &assetserver.Options{
 			Assets: assets,
@@ -77,6 +82,7 @@ func main() {
 			log.Println("[DEBUG] OnStartup called")
 			appCtx = ctx
 			app.startup(ctx)
+			go safeSystray()
 		},
 		OnDomReady: func(ctx context.Context) {
 			log.Println("[DEBUG] OnDomReady called — frontend loaded")
