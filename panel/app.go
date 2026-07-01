@@ -29,9 +29,6 @@ func (a *App) startup(ctx context.Context) {
 			runtime.EventsEmit(a.ctx, "panel:state-changed")
 		}
 	})
-	// WatchIwanConf is disabled — the daemon owns iwan.conf now and the
-	// panel synchronises server= via the control API, not by rewriting the
-	// config file and restarting.
 	a.manager.AutoConnect()
 }
 

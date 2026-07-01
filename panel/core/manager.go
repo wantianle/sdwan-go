@@ -1,3 +1,5 @@
+//go:build windows
+
 package core
 
 import (
@@ -18,8 +20,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"github.com/fsnotify/fsnotify"
 )
 
 // ServerInfo represents a selectable SD-WAN server node.
@@ -54,6 +54,7 @@ type SdwanManager struct {
 	tokenPath       string        // path to control.token
 	token           string        // loaded bearer token
 	stopCh          chan struct{} // signals poller / latency probe to stop
+	stopOnce        sync.Once
 	probeTrigger    chan struct{} // triggers an immediate probe
 	probePaused     atomic.Bool   // true = probes suspended (panel hidden)
 	daemonPollStop  chan struct{}
@@ -368,7 +369,10 @@ func (m *SdwanManager) Reload() bool {
 // AutoConnect ensures the daemon is running and connected on the configured
 // server. This is called on panel startup and when the panel is shown.
 func (m *SdwanManager) AutoConnect() {
-	if m.connected {
+	m.mu.Lock()
+	connected := m.connected
+	m.mu.Unlock()
+	if connected {
 		return
 	}
 	now := time.Now().UnixNano()
@@ -402,18 +406,6 @@ func hiddenCommand(name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd
-}
-
-// NeedsRestart returns true if the server in iwan.conf differs from the
-// server currently running. Used by WatchIwanConf to avoid restarting the
-// tunnel for unrelated config edits (MTU, password, etc.).
-func (m *SdwanManager) NeedsRestart() bool {
-	current := m.ParseIwanServer()
-	if current == "" {
-		return false
-	}
-	cfgServer := m.getCurrentServerName()
-	return current != cfgServer
 }
 
 // ResumeProbes unpauses the latency probe and fires an immediate probe cycle.
@@ -455,10 +447,7 @@ func (m *SdwanManager) Shutdown() {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	select {
-	case m.stopCh <- struct{}{}:
-	default:
-	}
+	m.stopOnce.Do(func() { close(m.stopCh) })
 	select {
 	case m.daemonPollStop <- struct{}{}:
 	default:
@@ -468,12 +457,6 @@ func (m *SdwanManager) Shutdown() {
 	defer m.mu.Unlock()
 
 	log.Println("[PANEL] Shutdown — probes stopped, daemon shutting down")
-}
-
-func (m *SdwanManager) isConnected() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.connected
 }
 
 func (m *SdwanManager) isManualSequenceChanged(seq uint64) bool {
@@ -522,8 +505,8 @@ func (m *SdwanManager) writeDefaultIwanConf() error {
 	serverName := m.getCurrentServerName()
 	content := fmt.Sprintf(`server=%s
 port=10010
-username=wantl
-password=Minieye@2026
+username=
+password=
 mtu=1436
 encrypt=0
 tunname=iwan1
@@ -614,28 +597,6 @@ func (m *SdwanManager) startDaemon() {
 			m.onStateChange()
 		}
 	}()
-}
-
-// stopDaemon kills the daemon subprocess if we own it (panel started it).
-func (m *SdwanManager) stopDaemon() {
-	if m.daemonCmd == nil || m.daemonCmd.Process == nil {
-		return
-	}
-
-	pid := m.daemonCmd.Process.Pid
-	taskkill := hiddenCommand("taskkill", "/PID", fmt.Sprintf("%d", pid))
-	if err := taskkill.Run(); err != nil {
-		log.Printf("[DAEMON] taskkill failed, force killing: %v", err)
-		m.daemonCmd.Process.Kill()
-	}
-
-	log.Printf("[DAEMON] Stopped daemon (PID: %d)", pid)
-	m.daemonCmd = nil
-
-	if m.logFile != nil {
-		m.logFile.Close()
-		m.logFile = nil
-	}
 }
 
 // ensureDaemonRunning checks whether the daemon is reachable via its control
@@ -827,9 +788,17 @@ func (m *SdwanManager) latencyProbe() {
 }
 
 func (m *SdwanManager) probeOnce() {
+	// Snapshot fields under lock to avoid races with config updates.
+	m.mu.Lock()
+	servers := make([]ServerInfo, len(m.config.Servers))
+	copy(servers, m.config.Servers)
+	currentServer := m.config.CurrentServer
+	stateChange := m.onStateChange
+	m.mu.Unlock()
+
 	// Probe all servers in parallel for speed
 	var wg sync.WaitGroup
-	for _, s := range m.config.Servers {
+	for _, s := range servers {
 		wg.Add(1)
 		go func(sid, sname string) {
 			defer wg.Done()
@@ -849,7 +818,7 @@ func (m *SdwanManager) probeOnce() {
 
 	// Update current server latency for status header
 	m.mu.Lock()
-	if ms, ok := m.serverLatency[m.config.CurrentServer]; ok {
+	if ms, ok := m.serverLatency[currentServer]; ok {
 		if ms > 0 {
 			m.latency = ms
 		} else {
@@ -860,8 +829,8 @@ func (m *SdwanManager) probeOnce() {
 	}
 	m.mu.Unlock()
 
-	if m.onStateChange != nil {
-		m.onStateChange()
+	if stateChange != nil {
+		stateChange()
 	}
 }
 
@@ -888,6 +857,15 @@ func smoothLatency(previous, sample int64) int64 {
 	}
 	return (previous*7 + sample*3 + 5) / 10
 }
+
+// NOTE: The probe protocol functions below (probeConfig, probeMsgOPENACK,
+// probeMsgOPEN, probeLatency, loadProbeConfig, probePktSign,
+// probePktSignInPlace, probePktVerify, probeEncryptPassword,
+// buildProbeOpenPacket, probeMsgType) are duplicates of
+// internal/core/protocol.go and must be kept in sync with any changes there.
+// They are actively used by the latency probe (probeOnce) and cannot be
+// removed / replaced with direct imports due to the Windows-only build
+// constraint of this package.
 
 type probeConfig struct {
 	Server   string
@@ -1087,54 +1065,6 @@ func probeMsgType(data []byte) byte {
 		return 0
 	}
 	return data[0]
-}
-
-// --- iwan.conf file watcher ------------------------------------------
-
-// WatchIwanConf monitors iwan.conf for external changes (e.g. user edits
-// with Notepad) and triggers a restart. onChange is called after a
-// 500ms debounce to avoid multiple rapid fires.
-func (m *SdwanManager) WatchIwanConf(onChange func()) {
-	path := m.iwanPath
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Printf("[CORE] Error creating file watcher: %v", err)
-		return
-	}
-	defer watcher.Close()
-
-	if err := watcher.Add(path); err != nil {
-		log.Printf("[CORE] Error watching iwan.conf: %v", err)
-		return
-	}
-
-	log.Printf("[CORE] Watching config: %s", path)
-
-	var debounceTimer *time.Timer
-	const debounceDelay = 500 * time.Millisecond
-
-	for {
-		select {
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
-			if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
-				if debounceTimer != nil {
-					debounceTimer.Stop()
-				}
-				debounceTimer = time.AfterFunc(debounceDelay, func() {
-					log.Println("[CORE] iwan.conf modified, restarting...")
-					onChange()
-				})
-			}
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-			log.Printf("[CORE] Watcher error: %v", err)
-		}
-	}
 }
 
 // --- helpers ---------------------------------------------------------

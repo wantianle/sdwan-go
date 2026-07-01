@@ -61,21 +61,42 @@ func LoadConfig(path string) (*Config, error) {
 		case "password":
 			cfg.Password = val
 		case "port":
-			v, _ := strconv.Atoi(val)
+			v, err := strconv.Atoi(val)
+			if err != nil {
+				return nil, fmt.Errorf("config: invalid port %q: %w", val, err)
+			}
 			if v > 0 {
 				cfg.Port = v
 			}
 		case "mtu":
-			v, _ := strconv.Atoi(val)
+			v, err := strconv.Atoi(val)
+			if err != nil {
+				return nil, fmt.Errorf("config: invalid MTU %q: %w", val, err)
+			}
 			if v > 0 {
 				cfg.MTU = v
 			}
 		case "encrypt":
-			cfg.Encrypt, _ = strconv.Atoi(val)
+			v, err := strconv.Atoi(val)
+			if err != nil {
+				return nil, fmt.Errorf("config: invalid encrypt %q: %w", val, err)
+			}
+			if v != 0 && v != 1 {
+				return nil, fmt.Errorf("config: encrypt must be 0 or 1, got %d", v)
+			}
+			cfg.Encrypt = v
 		case "pipeid":
-			cfg.PipeID, _ = strconv.Atoi(val)
+			v, err := strconv.Atoi(val)
+			if err != nil {
+				return nil, fmt.Errorf("config: invalid pipeid %q: %w", val, err)
+			}
+			cfg.PipeID = v
 		case "pipeidx":
-			cfg.PipeIdx, _ = strconv.Atoi(val)
+			v, err := strconv.Atoi(val)
+			if err != nil {
+				return nil, fmt.Errorf("config: invalid pipeidx %q: %w", val, err)
+			}
+			cfg.PipeIdx = v
 		case "routenet":
 			cfg.RouteNet = val
 		case "tunname":

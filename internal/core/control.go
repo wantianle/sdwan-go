@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -28,6 +29,12 @@ func loadOrGenerateToken(tokenPath string) (string, error) {
 		token := strings.TrimSpace(string(data))
 		if token == "" {
 			return "", fmt.Errorf("token file is empty: %s", tokenPath)
+		}
+		// Warn if permissions are more open than 0600
+		if fi, err := os.Stat(tokenPath); err == nil {
+			if fi.Mode().Perm()&0077 != 0 {
+				log.Printf("[CTRL] WARNING: token file %s has permissions %04o, should be 0600", tokenPath, fi.Mode().Perm())
+			}
 		}
 		return token, nil
 	}
@@ -63,7 +70,7 @@ func bearerAuth(next http.Handler, token string) http.Handler {
 			return
 		}
 		got := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-		if got != token {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
@@ -211,7 +218,7 @@ func startControlServer(addr string, token string, c *Client, shutdownCh chan<- 
 		Addr:         addr,
 		Handler:      authMux,
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Second,
+		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  30 * time.Second,
 		BaseContext: func(l net.Listener) context.Context {
 			return context.Background()

@@ -20,6 +20,9 @@ const (
 // PktSign generates the 16-byte signature for a packet.
 // signature = MD5(header[0:8] + "mw")
 func PktSign(header []byte) []byte {
+	if len(header) < 8 {
+		return nil
+	}
 	h := md5.New()
 	h.Write(header[:8])
 	h.Write([]byte("mw"))
@@ -33,7 +36,13 @@ func PktSignInPlace(header []byte) {
 
 // PktVerify checks if the signature in header[8:24] is valid
 func PktVerify(header []byte) bool {
+	if len(header) < 24 {
+		return false
+	}
 	expected := PktSign(header)
+	if expected == nil {
+		return false
+	}
 	for i := 0; i < 16; i++ {
 		if header[8+i] != expected[i] {
 			return false
@@ -72,7 +81,7 @@ func BuildOpenPacket(cfg *Config) []byte {
 	pos := 0
 
 	// ---- Header (24 bytes) ----
-	buf[pos] = MsgOPEN    // msg type
+	buf[pos] = MsgOPEN             // msg type
 	buf[pos+1] = byte(cfg.Encrypt) // encrypt flag
 	// pos+2..pos+3: session_id = 0 (not assigned yet)
 	// pos+4..pos+7: seq = 0
@@ -81,28 +90,28 @@ func BuildOpenPacket(cfg *Config) []byte {
 	pos += 16 // total header = 24
 
 	// ---- TLV 1: Protocol version / MTU (type=3, len=4) ----
-	buf[pos] = 0x03    // type
-	buf[pos+1] = 0x04  // length = 4
+	buf[pos] = 0x03   // type
+	buf[pos+1] = 0x04 // length = 4
 	binary.BigEndian.PutUint16(buf[pos+2:pos+4], uint16(cfg.MTU))
 	pos += 4
 
 	// ---- TLV 2: Username (type=1, len=len(username)+2) ----
-	buf[pos] = 0x01                                   // type
-	buf[pos+1] = byte(len(cfg.Username) + 2)          // length
-	copy(buf[pos+2:], cfg.Username)                    // value
+	buf[pos] = 0x01                          // type
+	buf[pos+1] = byte(len(cfg.Username) + 2) // length
+	copy(buf[pos+2:], cfg.Username)          // value
 	pos += 2 + len(cfg.Username)
 
 	// ---- TLV 3: Encrypted password (type=2, len=0x12) ----
 	encPW := EncryptPassword(cfg.Username, cfg.Password)
-	buf[pos] = 0x02    // type
-	buf[pos+1] = 0x12  // length = 18
+	buf[pos] = 0x02          // type
+	buf[pos+1] = 0x12        // length = 18
 	copy(buf[pos+2:], encPW) // 16 bytes AES block
 	pos += 2 + 16
 
 	// ---- TLV 4 (conditional): encrypt flag ----
 	if cfg.Encrypt != 0 {
-		buf[pos] = 0x08    // type
-		buf[pos+1] = 0x03  // length = 3
+		buf[pos] = 0x08   // type
+		buf[pos+1] = 0x03 // length = 3
 		buf[pos+2] = byte(cfg.Encrypt)
 		pos += 3
 	}
@@ -128,9 +137,9 @@ func BuildEchoReq(sessionID uint16, seq uint32, timestamp uint64, pipeID, pipeId
 
 	// Echo-specific data
 	binary.LittleEndian.PutUint64(buf[24:32], timestamp) // microsecond timestamp
-	binary.LittleEndian.PutUint32(buf[32:36], pipeID)     // pipeid
-	binary.LittleEndian.PutUint32(buf[36:40], pipeIdx)    // pipeidx
-	binary.LittleEndian.PutUint32(buf[40:44], echoCnt)    // echorespcnt
+	binary.LittleEndian.PutUint32(buf[32:36], pipeID)    // pipeid
+	binary.LittleEndian.PutUint32(buf[36:40], pipeIdx)   // pipeidx
+	binary.LittleEndian.PutUint32(buf[40:44], echoCnt)   // echorespcnt
 	// 4 unused bytes at [44:48] (original leaves these uninitialized)
 	// Magic "TDRi" at offset 48 (checked by original code: pktsign_return + 0x18)
 	copy(buf[48:52], []byte("TDRi"))
@@ -142,8 +151,11 @@ func BuildEchoReq(sessionID uint16, seq uint32, timestamp uint64, pipeID, pipeId
 }
 
 // ParseSessionID extracts the 2-byte session ID from an OPENACK header (bytes 2-3)
-func ParseSessionID(data []byte) uint16 {
-	return binary.BigEndian.Uint16(data[2:4])
+func ParseSessionID(data []byte) (uint16, bool) {
+	if len(data) < 4 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint16(data[2:4]), true
 }
 
 // ParseOPENACKSeq extracts the 4-byte sequence number from OPENACK header (bytes 4-7)
@@ -153,11 +165,11 @@ func ParseOPENACKSeq(data []byte) uint32 {
 
 // OPENACKResult holds parsed TUN configuration from the OPENACK response
 type OPENACKResult struct {
-	LocalIP    string
-	GatewayIP  string
-	DNSIP      string
-	MTU        uint16
-	GateMAC    []byte // 6 bytes gateway MAC
+	LocalIP   string
+	GatewayIP string
+	DNSIP     string
+	MTU       uint16
+	GateMAC   []byte // 6 bytes gateway MAC
 }
 
 // ParseOPENACK extracts TUN config from an OPENACK response.

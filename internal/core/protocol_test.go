@@ -94,7 +94,7 @@ func TestPktSignRoundTrip(t *testing.T) {
 			header: []byte{0x13, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 		},
 		{
-			name:   "ECHOREQ header with session",
+			name: "ECHOREQ header with session",
 			header: func() []byte {
 				h := make([]byte, 24)
 				h[0] = MsgECHOREQ
@@ -633,7 +633,13 @@ func TestParseSessionID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ParseSessionID(tt.data)
+			got, ok := ParseSessionID(tt.data)
+			if !ok {
+				if len(tt.data) >= 4 {
+					t.Errorf("ParseSessionID(%x) returned false", tt.data)
+				}
+				return
+			}
 			if got != tt.expected {
 				t.Errorf("ParseSessionID(%x) = 0x%04X, want 0x%04X", tt.data, got, tt.expected)
 			}
@@ -697,7 +703,7 @@ func TestParseOPENACK(t *testing.T) {
 		buf[0] = MsgOPENACK // 0x12
 		buf[1] = 0x00
 		binary.BigEndian.PutUint16(buf[2:4], 0x0001) // session_id
-		binary.BigEndian.PutUint32(buf[4:8], 1)       // seq
+		binary.BigEndian.PutUint32(buf[4:8], 1)      // seq
 		pos += 8
 		copy(buf[pos:pos+16], make([]byte, 16)) // signature placeholder
 		// Actually sign the header
@@ -847,7 +853,7 @@ func TestParseOPENACK(t *testing.T) {
 		pos := 24
 		buf[pos] = 0x03
 		buf[pos+1] = 0x01 // length=1, which is < 2 → should break loop
-		pos += 1 // won't be consumed fully
+		pos += 1          // won't be consumed fully
 
 		data := buf[:pos+1]
 		result := ParseOPENACK(data)
@@ -940,9 +946,9 @@ func TestSessionIDSeqRoundTrip(t *testing.T) {
 	binary.BigEndian.PutUint32(buf[4:8], 0x12345678)
 	PktSignInPlace(buf[:24])
 
-	sid := ParseSessionID(buf)
-	if sid != 0xABCD {
-		t.Errorf("ParseSessionID = 0x%04X, want 0xABCD", sid)
+	sid, ok := ParseSessionID(buf)
+	if !ok || sid != 0xABCD {
+		t.Errorf("ParseSessionID = 0x%04X (ok=%v), want 0xABCD", sid, ok)
 	}
 
 	seq := ParseOPENACKSeq(buf)

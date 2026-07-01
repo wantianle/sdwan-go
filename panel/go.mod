@@ -3,7 +3,6 @@ module sdwan-panel
 go 1.21
 
 require (
-	github.com/fsnotify/fsnotify v1.7.0
 	github.com/wailsapp/wails/v2 v2.9.1
 	golang.org/x/sys v0.20.0
 )

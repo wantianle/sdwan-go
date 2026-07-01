@@ -241,24 +241,22 @@ func setupTUN(cfg *Config, tunCfg *OPENACKResult, client *Client) (tunName strin
 
 	tunName = tun.Name()
 	if err := SetTUNIP(tunName, localCIDR, tunCfg.GatewayIP); err != nil {
-		log.Printf("[WARN] Set TUN IP failed: %v", err)
-	} else {
-		log.Printf("[TUN] %s IP=%s/24 gateway=%s", tunName, tunCfg.LocalIP, tunCfg.GatewayIP)
+		CloseTUN(tun, cfg.TUNName)
+		return "", nil, fmt.Errorf("set TUN IP: %w", err)
 	}
+	log.Printf("[TUN] %s IP=%s/24 gateway=%s", tunName, tunCfg.LocalIP, tunCfg.GatewayIP)
 
 	routeGW := tunCfg.LocalIP
 	if err := AddRoute(cfg.RouteNet, tunName, routeGW); err != nil {
 		log.Printf("[WARN] Route add failed (may need to wait): %v", err)
-		// Retry after delay
 		time.Sleep(3 * time.Second)
 		if err := AddRoute(cfg.RouteNet, tunName, routeGW); err != nil {
-			log.Printf("[WARN] Route still failed: %v", err)
-		} else {
-			log.Printf("[ROUTE] Added %s -> %s", cfg.RouteNet, tunName)
+			DelRoute(cfg.RouteNet, tunName, routeGW)
+			CloseTUN(tun, cfg.TUNName)
+			return "", nil, fmt.Errorf("add route: %w", err)
 		}
-	} else {
-		log.Printf("[ROUTE] Added %s -> %s", cfg.RouteNet, tunName)
 	}
+	log.Printf("[ROUTE] Added %s -> %s", cfg.RouteNet, tunName)
 
 	cleanup = func() {
 		DelRoute(cfg.RouteNet, tunName, routeGW)

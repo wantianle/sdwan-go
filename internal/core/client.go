@@ -468,7 +468,7 @@ func (s *Session) Handshake(cfg *Config) ([]byte, error) {
 				s.conn.Write(openPkt)
 				continue
 			}
-			s.id = ParseSessionID(data)
+			s.id, _ = ParseSessionID(data)
 			s.seq = ParseOPENACKSeq(data)
 			s.conn.SetReadDeadline(time.Time{})
 			log.Printf("[AUTH] OPENACK received, session=%d seq=%d", s.id, s.seq)

@@ -5,6 +5,7 @@ package core
 import (
 	"fmt"
 	"log"
+	"net"
 	"os/exec"
 	"strings"
 	"time"
@@ -94,13 +95,16 @@ func CreateTUN(name string, mtu int, _ string) (TunDevice, error) {
 // default route/DNS side effects for that gateway, so SetTUNIP immediately
 // cleans those up and leaves only the explicit SDWAN route added by AddRoute.
 func SetTUNIP(name, ip, gateway string) error {
-	// Derive a dummy gateway from the local IP: first host on the same /24
-	lastDot := strings.LastIndex(ip, ".")
-	dummyGW := ip[:lastDot+1] + "1"
+	// ip may be CIDR e.g. "10.100.100.7/24"; netsh expects bare IP.
+	bareIP := strings.SplitN(ip, "/", 2)[0]
 
-	log.Printf("[WINTUN] Setting IP via netsh: name=%q ip=%s gw=%s (server=%s)", name, ip, dummyGW, gateway)
+	// Derive a dummy gateway from the local IP: first host on the same /24
+	lastDot := strings.LastIndex(bareIP, ".")
+	dummyGW := bareIP[:lastDot+1] + "1"
+
+	log.Printf("[WINTUN] Setting IP via netsh: name=%q ip=%s gw=%s (server=%s)", name, bareIP, dummyGW, gateway)
 	out, err := exec.Command("netsh", "interface", "ip", "set", "address",
-		name, "static", ip, "255.255.255.0", dummyGW, "1").CombinedOutput()
+		name, "static", bareIP, "255.255.255.0", dummyGW, "1").CombinedOutput()
 	if err != nil {
 		log.Printf("[WINTUN] netsh failed: %s", string(out))
 		return fmt.Errorf("netsh: %s", string(out))
@@ -199,14 +203,19 @@ func allDigits(s string) bool {
 }
 
 // AddRoute adds an on-link route (gateway 0.0.0.0) through the TUN interface.
-// On-link routing works because wintun is a proper L3 TUN: no ARP needed.
-func AddRoute(_ string, tunName, _ string) error {
+func AddRoute(network string, tunName, _ string) error {
+	_, cidr, err := net.ParseCIDR(network)
+	if err != nil {
+		return fmt.Errorf("parse network CIDR %q: %w", network, err)
+	}
+	ip := cidr.IP.String()
+	mask := fmt.Sprintf("%d.%d.%d.%d", cidr.Mask[0], cidr.Mask[1], cidr.Mask[2], cidr.Mask[3])
+
 	idx, err := getTunIndex(tunName)
 	if err != nil {
 		return fmt.Errorf("getTunIndex: %w", err)
 	}
-	cmd := exec.Command("route", "add", "192.168.0.0", "mask", "255.255.0.0",
-		"0.0.0.0", "IF", idx)
+	cmd := exec.Command("route", "add", ip, "mask", mask, "0.0.0.0", "IF", idx)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("route add IF=%s: %s", idx, string(out))
@@ -215,15 +224,20 @@ func AddRoute(_ string, tunName, _ string) error {
 }
 
 // DelRoute removes the tunnel route.
-func DelRoute(_ string, tunName, _ string) {
+func DelRoute(network string, tunName, _ string) {
+	_, cidr, err := net.ParseCIDR(network)
+	if err != nil {
+		log.Printf("[DELROUTE] parse CIDR %q: %v", network, err)
+		return
+	}
+	ip := cidr.IP.String()
+	mask := fmt.Sprintf("%d.%d.%d.%d", cidr.Mask[0], cidr.Mask[1], cidr.Mask[2], cidr.Mask[3])
+
 	idx, err := getTunIndex(tunName)
 	if err == nil {
-		exec.Command("route", "delete", "192.168.0.0",
-			"mask", "255.255.0.0", "0.0.0.0", "IF", idx).Run()
+		exec.Command("route", "delete", ip, "mask", mask, "0.0.0.0", "IF", idx).Run()
 	} else {
-		// Fallback: try without IF if interface lookup failed
-		exec.Command("route", "delete", "192.168.0.0",
-			"mask", "255.255.0.0", "0.0.0.0").Run()
+		exec.Command("route", "delete", ip, "mask", mask, "0.0.0.0").Run()
 	}
 }
 
