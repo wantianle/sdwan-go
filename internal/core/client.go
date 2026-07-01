@@ -48,6 +48,7 @@ type Client struct {
 	closeOnce        sync.Once
 	packetPumpOnce   sync.Once // ensures tunToServer goroutine is launched once
 	reconnectStarted atomic.Bool
+	reconnecting     atomic.Bool
 	switchMu         sync.Mutex // serializes SwitchServer calls
 }
 
@@ -303,6 +304,8 @@ func (c *Client) Status() *StatusResult {
 	if c.session != nil && c.session.id != 0 {
 		sr.State = "running"
 		sr.SessionID = c.session.id
+	} else if c.reconnecting.Load() {
+		sr.State = "reconnecting"
 	}
 
 	if c.config != nil {
@@ -504,28 +507,38 @@ func (c *Client) startReconnect() {
 }
 
 func (c *Client) reconnectLoop() {
-	backoff := time.Second
+	backoff := 500 * time.Millisecond
 	for {
 		select {
 		case <-c.stopCh:
+			c.reconnecting.Store(false)
 			return
 		case <-c.reconnectCh:
+			c.reconnecting.Store(true)
 		}
 
 		for {
 			select {
 			case <-c.stopCh:
+				c.reconnecting.Store(false)
 				return
 			default:
 			}
 
 			if c.currentSession() != nil {
-				backoff = time.Second
+				backoff = 500 * time.Millisecond
+				c.reconnecting.Store(false)
 				break
 			}
 			cfg := cloneConfig(c.currentConfig())
 			if cfg == nil {
-				log.Println("[RECONNECT] No config available; waiting")
+				select {
+				case <-c.stopCh:
+					c.reconnecting.Store(false)
+					return
+				case <-time.After(500 * time.Millisecond):
+				}
+				continue
 			} else {
 				log.Printf("[RECONNECT] Attempting reconnect to %s:%d", cfg.Server, cfg.Port)
 				if _, err := c.SwitchServer(cfg); err != nil {
@@ -536,13 +549,21 @@ func (c *Client) reconnectLoop() {
 					}
 				} else {
 					log.Println("[RECONNECT] Reconnect succeeded")
-					backoff = time.Second
+					backoff = 500 * time.Millisecond
+					c.reconnecting.Store(false)
 					break
 				}
 			}
 
+			if c.currentSession() != nil {
+				backoff = 500 * time.Millisecond
+				c.reconnecting.Store(false)
+				break
+			}
+
 			select {
 			case <-c.stopCh:
+				c.reconnecting.Store(false)
 				return
 			case <-time.After(backoff):
 			}
@@ -570,6 +591,9 @@ func (c *Client) startPacketPumpOnce() {
 func (c *Client) sessionToTUN(s *Session) error {
 	buf := make([]byte, 2048)
 	for {
+		// Rolling deadline detects dead UDP sessions after physical network changes;
+		// timeout flows through runSessionToTUN -> failSession -> reconnect.
+		s.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		n, err := s.conn.Read(buf)
 		if err != nil {
 			log.Printf("[ERROR] Read from server: %v", err)

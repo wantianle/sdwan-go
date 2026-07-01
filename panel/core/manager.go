@@ -43,6 +43,7 @@ type SdwanManager struct {
 	configPath      string
 	iwanPath        string
 	config          *Config
+	state           string
 	connected       bool
 	latency         int64
 	serverLatency   map[string]int64 // per-server latency
@@ -78,6 +79,7 @@ func GetManager() *SdwanManager {
 			configPath:     filepath.Join(dir, "config.json"),
 			iwanPath:       filepath.Join(dir, "iwan.conf"),
 			config:         defaultConfig(),
+			state:          "disconnected",
 			serverLatency:  make(map[string]int64),
 			controlAddr:    "127.0.0.1:17890",
 			tokenPath:      filepath.Join(dir, "control.token"),
@@ -149,6 +151,7 @@ func (m *SdwanManager) GetStatus() map[string]interface{} {
 	defer m.mu.Unlock()
 
 	return map[string]interface{}{
+		"state":          m.state,
 		"connected":      m.connected,
 		"latency":        m.latency,
 		"latency_text":   formatLatency(m.latency),
@@ -208,6 +211,7 @@ func (m *SdwanManager) ToggleConnection() bool {
 
 		if sr.State == "running" {
 			m.mu.Lock()
+			m.state = "running"
 			m.connected = true
 			m.mu.Unlock()
 			if m.onStateChange != nil {
@@ -215,15 +219,21 @@ func (m *SdwanManager) ToggleConnection() bool {
 			}
 			return
 		}
+		m.mu.Lock()
+		m.state = sr.State
+		m.connected = false
+		m.mu.Unlock()
 
 		log.Printf("[PANEL] Daemon reachable but tunnel disconnected — reconnecting to %s", serverName)
 		if _, err := postControlSwitch(controlAddr, token, serverName); err != nil {
 			log.Printf("[PANEL] Reconnect switch failed: %v", err)
 			m.mu.Lock()
+			m.state = "disconnected"
 			m.connected = false
 			m.mu.Unlock()
 		} else {
 			m.mu.Lock()
+			m.state = "running"
 			m.connected = true
 			m.mu.Unlock()
 		}
@@ -271,6 +281,7 @@ func (m *SdwanManager) SelectServer(id string) bool {
 			if err == nil {
 				m.startDaemonPoller()
 				m.mu.Lock()
+				m.state = sr.State
 				m.connected = sr.State == "running"
 				m.mu.Unlock()
 
@@ -286,6 +297,7 @@ func (m *SdwanManager) SelectServer(id string) bool {
 				if _, err := postControlSwitch(controlAddr, token, targetName); err != nil {
 					log.Printf("[PANEL] Daemon switch failed: %v", err)
 					m.mu.Lock()
+					m.state = "disconnected"
 					m.connected = false
 					m.mu.Unlock()
 					if m.onStateChange != nil {
@@ -296,6 +308,7 @@ func (m *SdwanManager) SelectServer(id string) bool {
 
 				m.mu.Lock()
 				m.config.CurrentServer = id
+				m.state = "running"
 				m.connected = true
 				m.mu.Unlock()
 				_ = m.saveConfig()
@@ -635,6 +648,7 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 		if err == nil {
 			if sr.State == "running" {
 				m.mu.Lock()
+				m.state = "running"
 				m.connected = true
 				m.daemonStarting = false
 				m.mu.Unlock()
@@ -644,6 +658,7 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 			// API reachable but tunnel disconnected — daemon process is alive,
 			// just needs a reconnection via /v1/switch. Do NOT start a duplicate.
 			m.mu.Lock()
+			m.state = sr.State
 			m.connected = false
 			m.daemonStarting = false
 			m.mu.Unlock()
@@ -706,6 +721,7 @@ func (m *SdwanManager) pollDaemonReady(token, controlAddr string) bool {
 		time.Sleep(1 * time.Second)
 		if sr, err := getControlStatus(controlAddr, token); err == nil && sr.State == "running" {
 			m.mu.Lock()
+			m.state = "running"
 			m.connected = true
 			m.daemonStarting = false
 			m.mu.Unlock()
@@ -746,7 +762,7 @@ func (m *SdwanManager) pollDaemonStatusOnce() {
 	token := m.token
 	controlAddr := m.controlAddr
 	hasDaemonCmd := m.daemonCmd != nil && m.daemonCmd.Process != nil
-	wasConnected := m.connected
+	wasState := m.state
 	m.mu.Unlock()
 
 	if token == "" {
@@ -756,11 +772,13 @@ func (m *SdwanManager) pollDaemonStatusOnce() {
 
 	m.mu.Lock()
 	if err == nil {
+		m.state = sr.State
 		m.connected = sr.State == "running"
 	} else if !hasDaemonCmd {
+		m.state = "disconnected"
 		m.connected = false
 	}
-	changed := wasConnected != m.connected
+	changed := wasState != m.state
 	m.mu.Unlock()
 
 	if changed && m.onStateChange != nil {

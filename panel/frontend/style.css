@@ -107,6 +107,22 @@ body {
   background: #34c759;
 }
 
+.status-dot.reconnecting {
+  background: #f59e0b;
+  animation: reconnect-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes reconnect-pulse {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.35);
+  }
+  50% {
+    opacity: 0.65;
+    box-shadow: 0 0 0 5px rgba(245, 158, 11, 0);
+  }
+}
+
 .status-text {
   flex: 1;
   min-width: 0;
@@ -234,6 +250,17 @@ input:checked + .slider::before {
   border-color: #bfdbfe;
 }
 
+.server-item.switching {
+  background: #fffbeb;
+  border-color: #fbbf24;
+  cursor: wait;
+}
+
+.server-item.switching .dot {
+  background: #f59e0b;
+  border-color: #f59e0b;
+}
+
 .server-item .dot {
   width: 8px;
   height: 8px;
@@ -264,6 +291,11 @@ input:checked + .slider::before {
 .server-item .latency {
   font-size: 12px;
   color: #6b7280;
+}
+
+.server-item.switching .latency {
+  color: #b45309;
+  font-weight: 600;
 }
 
 .actions {

@@ -9,6 +9,7 @@ const closeButton   = document.getElementById('btn-close');
 // ---- State ----
 let currentServerId = '';
 let pollTimer = null;
+let switchingServerId = '';
 
 // ---- Init ----
 document.addEventListener('DOMContentLoaded', () => {
@@ -29,7 +30,7 @@ document.addEventListener('DOMContentLoaded', () => {
   toggleInput.addEventListener('change', () => {
     window.go.main.App.ToggleConnection().then(connected => {
       toggleInput.checked = connected;
-      updateConnectionUI(connected);
+      updateConnectionUI(connected, connected ? 'running' : 'disconnected');
       window.go.main.App.GetStatus().then(s => updateStatusUI(s));
     });
   });
@@ -91,17 +92,21 @@ function hidePanel() {
 // ---- UI updaters ----
 
 function updateStatusUI(s) {
-  updateConnectionUI(s.connected);
+  updateConnectionUI(s.connected, s.state || (s.connected ? 'running' : 'disconnected'));
   statusLatency.textContent = s.latency_text || '--';
 }
 
-function updateConnectionUI(connected) {
-  if (connected) {
+function updateConnectionUI(connected, state) {
+  statusDot.classList.remove('connected', 'reconnecting');
+  if (state === 'running' || connected) {
     statusDot.classList.add('connected');
     statusLabel.textContent = '已连接';
     toggleInput.checked = true;
+  } else if (state === 'reconnecting') {
+    statusDot.classList.add('reconnecting');
+    statusLabel.textContent = '重新连接中...';
+    toggleInput.checked = true;
   } else {
-    statusDot.classList.remove('connected');
     statusLabel.textContent = '已断开';
     toggleInput.checked = false;
   }
@@ -110,6 +115,7 @@ function updateConnectionUI(connected) {
 function renderServerItem(s, latText) {
   const item = document.createElement('div');
   item.className = 'server-item' + (s.selected === 'true' ? ' selected' : '');
+  if (switchingServerId === s.id) item.classList.add('switching');
   item.dataset.serverId = s.id;
 
   const dot = document.createElement('div');
@@ -126,21 +132,32 @@ function renderServerItem(s, latText) {
 
   const lat = document.createElement('div');
   lat.className = 'latency';
-  lat.textContent = latText || '';
+  lat.textContent = switchingServerId === s.id ? '切换中...' : (latText || '');
   info.appendChild(lat);
 
   item.appendChild(info);
 
   item.addEventListener('click', () => {
+    if (switchingServerId) return;
+    switchingServerId = s.id;
+    item.classList.add('switching');
+    lat.textContent = '切换中...';
     window.go.main.App.SelectServer(s.id).then(ok => {
       if (ok) {
         refreshStatus();
         refreshServers();
         setTimeout(() => {
+          switchingServerId = '';
           refreshStatus();
           refreshServers();
         }, 800);
+      } else {
+        switchingServerId = '';
+        refreshServers();
       }
+    }).catch(() => {
+      switchingServerId = '';
+      refreshServers();
     });
   });
 

@@ -1,5 +1,11 @@
 #Requires -RunAsAdministrator
 
+param([string]$Version = "latest")
+
+# Usage:
+#   Saved script: .\install.ps1 -Version v1.0.29
+#   Remote scriptblock: & ([scriptblock]::Create((irm https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.ps1))) -Version v1.0.29
+
 $ErrorActionPreference = "Continue"
 $REPO_OWNER = "wantianle"
 $REPO_NAME  = "sdwan-go"
@@ -17,6 +23,7 @@ Write-Host ""
 Write-Host "===========================================" -ForegroundColor Cyan
 Write-Host "  SD-WAN Windows Installer" -ForegroundColor Cyan
 Write-Host "===========================================" -ForegroundColor Cyan
+Write-Host "  Version: $Version" -ForegroundColor Cyan
 Write-Host ""
 
 # ────────────────────────────────────────────────────────────
@@ -151,9 +158,14 @@ function Download-File {
     throw "Download failed: $name"
 }
 
-$releaseUrl = "https://github.com/$REPO_OWNER/$REPO_NAME/releases/latest/download"
+if ($Version -eq "latest") {
+    $releaseUrl = "https://github.com/$REPO_OWNER/$REPO_NAME/releases/latest/download"
+} else {
+    $releaseUrl = "https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$Version"
+}
 
 Write-Host "[2/5] Download components..."
+Write-Host "  Release version: $Version"
 
 # Release only. dist/ is not committed to git.
 $coreUrls  = @("$releaseUrl/sdwan-windows-amd64.exe")

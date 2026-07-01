@@ -7,6 +7,8 @@ set -euo pipefail
 #
 # One-liner:
 #   curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/scripts/install.sh | sudo bash
+# Specific version:
+#   curl -fsSL https://raw.githubusercontent.com/USER/REPO/main/scripts/install.sh | sudo bash -s -- -v v1.0.29
 # ────────────────────────────────────────────────────────────
 
 REPO_OWNER="wantianle"
@@ -16,8 +18,45 @@ GH_PROXIES=("https://gh.ddlc.top/" "https://gh-proxy.com/" "https://gh.idayer.co
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/sdwan"
 CONFIG_FILE="$CONFIG_DIR/iwan.conf"
+VERSION="latest"
 
 G='\033[0;32m'; R='\033[0;31m'; Y='\033[0;33m'; B='\e[0;34m'; NC='\033[0m'
+
+# ────────────────────────────────────────────────────────────
+usage() {
+    cat <<EOF
+Usage: sudo bash install.sh [options]
+
+Options:
+  -v, --version VERSION   Install a specific GitHub release tag (default: latest)
+  -h, --help              Show this help
+
+Examples:
+  curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/scripts/install.sh | sudo bash
+  curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/scripts/install.sh | sudo bash -s -- -v v1.0.29
+EOF
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -v|--version)
+                [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 1; }
+                VERSION="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                usage >&2
+                exit 1
+                ;;
+        esac
+    done
+}
 
 # ────────────────────────────────────────────────────────────
 check_root() {
@@ -121,10 +160,15 @@ EOF
 # ────────────────────────────────────────────────────────────
 download_binary() {
     local binary="$1"
-    local release_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download/${binary}"
+    local release_url
+    if [[ "$VERSION" == "latest" ]]; then
+        release_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download/${binary}"
+    else
+        release_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${VERSION}/${binary}"
+    fi
     local dest="$INSTALL_DIR/sdwan"
 
-    echo -e "${B}📥 下载 $binary ...${NC}"
+    echo -e "${B}📥 下载 $binary (version: $VERSION) ...${NC}"
 
     # Build ordered URL list: each proxy mirror then direct
     local -a urls=()
@@ -253,6 +297,7 @@ verify() {
 
 # ────────────────────────────────────────────────────────────
 main() {
+    parse_args "$@"
     check_root
     detect_platform
 
@@ -276,4 +321,4 @@ main() {
     verify
 }
 
-main
+main "$@"
