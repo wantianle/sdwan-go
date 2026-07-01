@@ -16,6 +16,11 @@ const trayIconBase64 = "AAABAAEAICAAAAEAIAAsAQAAFgAAAIlQTkcNChoKAAAADUlIRFIAAAAg
 
 var trayIconBytes = loadTrayIcon()
 
+// taskbarCreatedMsg is the registered Windows message sent by explorer
+// when the taskbar is (re)created (e.g. after sleep/wake). We listen for
+// it to re-add the tray icon that was lost during the reset.
+var taskbarCreatedMsg uint32
+
 func loadTrayIcon() []byte {
 	data, _ := base64.StdEncoding.DecodeString(trayIconBase64)
 	return data
@@ -161,7 +166,7 @@ func startSysTray() {
 	}
 	procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
-	// Create hidden message-only window
+	// Create hidden top-level window to receive tray callbacks and broadcasts
 	result, _, _ := procCreateWindowExW.Call(
 		0,
 		uintptr(unsafe.Pointer(className)),
@@ -181,6 +186,16 @@ func startSysTray() {
 
 	// Add tray icon
 	addTrayIcon()
+
+	// Register for TaskbarCreated notification — Windows sends this when
+	// explorer restarts the taskbar (e.g. after sleep/wake). Without this
+	// the tray icon becomes a zombie: visible but unresponsive to clicks.
+	taskbarStr, _ := windows.UTF16PtrFromString("TaskbarCreated")
+	ret, _, _ := user32.NewProc("RegisterWindowMessageW").Call(uintptr(unsafe.Pointer(taskbarStr)))
+	taskbarCreatedMsg = uint32(ret)
+	if taskbarCreatedMsg == 0 {
+		log.Println("[TRAY] RegisterWindowMessageW(TaskbarCreated) failed — tray will not recover from sleep/wake")
+	}
 
 	// Message loop
 	var msg MSG
@@ -228,6 +243,11 @@ func deleteTrayIcon() {
 }
 
 func trayWndProc(hwnd windows.Handle, msg uint32, wParam, lParam uintptr) uintptr {
+	if msg == taskbarCreatedMsg && taskbarCreatedMsg != 0 {
+		log.Println("[TRAY] TaskbarCreated: re-adding tray icon")
+		addTrayIcon()
+		return 0
+	}
 	switch msg {
 	case WM_TRAYICON:
 		switch lParam {
