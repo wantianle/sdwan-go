@@ -90,8 +90,9 @@ func CreateTUN(name string, mtu int, _ string) (TunDevice, error) {
 // SetTUNIP assigns a static IP to the TUN adapter via netsh.
 // Gateway is set to the first host on the same subnet (e.g. 10.100.100.1)
 // so Windows treats the interface as having a valid next-hop — without this
-// the on-link route may not forward traffic. The dummy gateway is on the
-// same /24 so it will NOT create a default route that steals internet traffic.
+// the on-link route may not forward traffic. Windows may still create a
+// default route/DNS side effects for that gateway, so SetTUNIP immediately
+// cleans those up and leaves only the explicit SDWAN route added by AddRoute.
 func SetTUNIP(name, ip, gateway string) error {
 	// Derive a dummy gateway from the local IP: first host on the same /24
 	lastDot := strings.LastIndex(ip, ".")
@@ -105,7 +106,37 @@ func SetTUNIP(name, ip, gateway string) error {
 		return fmt.Errorf("netsh: %s", string(out))
 	}
 	log.Printf("[WINTUN] netsh OK")
+	cleanupWindowsTunRouting(name, dummyGW)
 	return nil
+}
+
+func cleanupWindowsTunRouting(name, dummyGW string) {
+	log.Printf("[WINTUN] Hardening interface %q: metric=9999, remove default routes, clear DNS", name)
+	runWindowsCleanup("set IPv4 metric", "netsh", "interface", "ipv4", "set", "interface", name, "metric=9999")
+	runWindowsCleanup("set IPv6 metric", "netsh", "interface", "ipv6", "set", "interface", name, "metric=9999")
+	runWindowsCleanup("clear IPv4 DNS", "netsh", "interface", "ipv4", "delete", "dnsservers", name, "all")
+	runWindowsCleanup("clear IPv6 DNS", "netsh", "interface", "ipv6", "delete", "dnsservers", name, "all")
+
+	idx, err := getTunIndex(name)
+	if err != nil {
+		log.Printf("[WINTUN] default route cleanup skipped interface-scoped delete: %v", err)
+		runWindowsCleanup("delete default route", "route", "delete", "0.0.0.0", "mask", "0.0.0.0", dummyGW)
+		runWindowsCleanup("delete persistent default route", "route", "-p", "delete", "0.0.0.0", "mask", "0.0.0.0", dummyGW)
+		return
+	}
+
+	runWindowsCleanup("delete default route", "route", "delete", "0.0.0.0", "mask", "0.0.0.0", dummyGW, "IF", idx)
+	runWindowsCleanup("delete persistent default route", "route", "-p", "delete", "0.0.0.0", "mask", "0.0.0.0", dummyGW, "IF", idx)
+}
+
+func runWindowsCleanup(label, name string, args ...string) {
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("[WINTUN] cleanup warning (%s): %v %s", label, err, strings.TrimSpace(string(out)))
+		return
+	}
+	log.Printf("[WINTUN] cleanup OK: %s", label)
 }
 
 // getTunIndex finds the Windows interface index for the given adapter name.
