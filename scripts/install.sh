@@ -326,9 +326,11 @@ verify() {
         fi
     fi
 
-    if printf '%s\n' "$logs" | grep -qi "AUTH REJECTED"; then
+    local auth_marker=""
+    auth_marker=$(printf '%s\n' "$logs" | grep -Ei "AUTH REJECTED|Authenticated successfully|Tunnel established|OPENACK received" | tail -n 1 || true)
+    if printf '%s\n' "$auth_marker" | grep -qi "AUTH REJECTED"; then
         echo -e "  认证:     ${R}失败，用户名或密码错误 (AUTH REJECTED)${NC}"
-    elif printf '%s\n' "$logs" | grep -Eqi "Authenticated successfully|Tunnel established|OPENACK received"; then
+    elif [[ -n "$auth_marker" ]]; then
         echo -e "  认证/隧道:${G} 已建立${NC}"
     else
         echo -e "  认证/隧道:${Y} 状态未知，请稍后查看日志${NC}"

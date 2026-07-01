@@ -339,6 +339,7 @@ function Test-PostInstallStatus {
 
     $authRejected = $false
     $established = $false
+    $lastMarker = ""
     $sdwanIP = $null
 
     for ($i = 0; $i -lt 25; $i++) {
@@ -346,8 +347,13 @@ function Test-PostInstallStatus {
 
         if (Test-Path $logPath) {
             $logText = Get-Content -Path $logPath -Tail 160 -ErrorAction SilentlyContinue | Out-String
-            if ($logText -match "AUTH REJECTED") { $authRejected = $true; break }
-            if ($logText -match "Authenticated successfully|Tunnel established|OPENACK received") { $established = $true }
+            $markers = [regex]::Matches($logText, "AUTH REJECTED|Authenticated successfully|Tunnel established|OPENACK received", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($markers.Count -gt 0) {
+                $lastMarker = $markers[$markers.Count - 1].Value
+                $authRejected = $lastMarker -eq "AUTH REJECTED"
+                $established = $lastMarker -ne "AUTH REJECTED"
+                if ($authRejected) { break }
+            }
         }
 
         try {
