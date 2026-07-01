@@ -19,8 +19,9 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/sdwan"
 CONFIG_FILE="$CONFIG_DIR/iwan.conf"
 VERSION="latest"
+TEST_HOST="${TEST_HOST:-hfs.minieye.tech}"
 
-G='\033[0;32m'; R='\033[0;31m'; Y='\033[0;33m'; B='\e[0;34m'; NC='\033[0m'
+G='\033[0;32m'; R='\033[0;31m'; Y='\033[0;33m'; B='\033[0;34m'; NC='\033[0m'
 
 # ────────────────────────────────────────────────────────────
 usage() {
@@ -285,17 +286,66 @@ EOF
 verify() {
     echo ""
     echo "────────────── 状态检查 ──────────────"
-    sleep 2
+    echo -e "  等待隧道建立..."
+    sleep 6
 
-    if ip link show iwan1 &>/dev/null; then
-        echo -e "  虚拟网卡: ${G}iwan1 已创建${NC}"
-        ip addr show iwan1 2>/dev/null | grep "inet " | awk '{print "  └─ IP: " $2}'
+    local logs=""
+    if [[ "$OS" == "linux" ]]; then
+        logs=$(journalctl -u sdwan -n 120 --no-pager 2>/dev/null || true)
     else
-        echo -e "  虚拟网卡: ${Y}iwan1 尚未出现 (请稍候)${NC}"
+        logs=$(tail -n 120 /var/log/sdwan.log 2>/dev/null || true)
     fi
 
-    if ip route 2>/dev/null | grep -q iwan1 || route -n get 192.168.0.0 2>/dev/null | grep -q iwan1; then
-        echo -e "  路由:     ${G}192.168.0.0/16 → iwan1${NC}"
+    if [[ "$OS" == "linux" ]]; then
+        if ip link show iwan1 &>/dev/null; then
+            echo -e "  虚拟网卡: ${G}iwan1 已创建${NC}"
+            ip -4 addr show iwan1 2>/dev/null | grep "inet " | awk '{print "  └─ IP: " $2}' || true
+        else
+            echo -e "  虚拟网卡: ${Y}iwan1 尚未出现 (请稍候)${NC}"
+        fi
+
+        if ip route 2>/dev/null | grep -q "192.168.0.0/16.*iwan1"; then
+            echo -e "  路由:     ${G}192.168.0.0/16 → iwan1${NC}"
+        else
+            echo -e "  路由:     ${Y}未确认 192.168.0.0/16 → iwan1${NC}"
+        fi
+    else
+        local darwin_ip=""
+        darwin_ip=$(ifconfig 2>/dev/null | awk '/^utun[0-9]+:/{found=1; next} /^[a-z]+[0-9]+:/{found=0} found && /inet /{print $2; exit}' || true)
+        if [[ -n "$darwin_ip" ]]; then
+            echo -e "  虚拟网卡: ${G}utun 已创建${NC}"
+            echo "  └─ IP: $darwin_ip"
+        else
+            echo -e "  虚拟网卡: ${Y}utun IP 尚未出现 (请稍候)${NC}"
+        fi
+
+        if route -n get 192.168.0.0 2>/dev/null | grep -q 'interface: utun'; then
+            echo -e "  路由:     ${G}192.168.0.0/16 → utun${NC}"
+        else
+            echo -e "  路由:     ${Y}未确认 192.168.0.0/16 → utun${NC}"
+        fi
+    fi
+
+    if printf '%s\n' "$logs" | grep -qi "AUTH REJECTED"; then
+        echo -e "  认证:     ${R}失败，用户名或密码错误 (AUTH REJECTED)${NC}"
+    elif printf '%s\n' "$logs" | grep -Eqi "Authenticated successfully|Tunnel established|OPENACK received"; then
+        echo -e "  认证/隧道:${G} 已建立${NC}"
+    else
+        echo -e "  认证/隧道:${Y} 状态未知，请稍后查看日志${NC}"
+    fi
+
+    if [[ "$OS" == "linux" ]]; then
+        if ping -c 1 -W 2 "$TEST_HOST" >/dev/null 2>&1; then
+            echo -e "  内网测试: ${G}$TEST_HOST 可达${NC}"
+        else
+            echo -e "  内网测试: ${Y}$TEST_HOST 暂不可达 (警告，不影响安装)${NC}"
+        fi
+    else
+        if ping -c 1 -W 2000 "$TEST_HOST" >/dev/null 2>&1; then
+            echo -e "  内网测试: ${G}$TEST_HOST 可达${NC}"
+        else
+            echo -e "  内网测试: ${Y}$TEST_HOST 暂不可达 (警告，不影响安装)${NC}"
+        fi
     fi
 
     echo "──────────────────────────────────────"
@@ -324,9 +374,17 @@ main() {
     SERVER=$(select_server)
     echo -e "${G}✅ 服务器: $SERVER${NC}"
 
-    read -rp "👤 工号 (username): " USERNAME </dev/tty
-    read -rsp "🔑 密码 (password): " PASSWORD </dev/tty
-    echo
+    while true; do
+        read -rp "👤 工号 (username): " USERNAME </dev/tty
+        [[ -n "${USERNAME//[[:space:]]/}" ]] && break
+        echo -e "${Y}用户名不能为空，请重新输入${NC}"
+    done
+    while true; do
+        read -rsp "🔑 密码 (password): " PASSWORD </dev/tty
+        echo
+        [[ -n "$PASSWORD" ]] && break
+        echo -e "${Y}密码不能为空，请重新输入${NC}"
+    done
 
     write_config "$SERVER" "$USERNAME" "$PASSWORD"
 

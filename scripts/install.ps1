@@ -1,6 +1,9 @@
 #Requires -RunAsAdministrator
 
-param([string]$Version = "latest")
+param(
+    [string]$Version = "latest",
+    [string]$TestHost = "hfs.minieye.tech"
+)
 
 # Usage:
 #   Saved script: .\install.ps1 1.0.29
@@ -263,10 +266,21 @@ Write-Host "[4/5] Account config" -ForegroundColor Cyan
 if ($useExistingConfig) {
     Write-Host "  Using existing config: $configPath" -ForegroundColor Green
 } else {
-    $username = Read-Host "  Username"
-    $password = Read-Host "  Password" -AsSecureString
-    $passwordPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-        [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($password))
+    do {
+        $username = Read-Host "  Username"
+        if ([string]::IsNullOrWhiteSpace($username)) {
+            Write-Host "  Username cannot be empty" -ForegroundColor Yellow
+        }
+    } while ([string]::IsNullOrWhiteSpace($username))
+
+    do {
+        $password = Read-Host "  Password" -AsSecureString
+        $passwordPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($password))
+        if ([string]::IsNullOrWhiteSpace($passwordPlain)) {
+            Write-Host "  Password cannot be empty" -ForegroundColor Yellow
+        }
+    } while ([string]::IsNullOrWhiteSpace($passwordPlain))
 
     $configContent = @"
 server=$selectedServer
@@ -312,7 +326,69 @@ try {
 }
 
 Write-Host "  Launching panel..." -ForegroundColor Cyan
+$logPath = Join-Path $INSTALL_DIR "sdwan.log"
+if (Test-Path $logPath) {
+    Move-Item -Path $logPath -Destination "$logPath.old" -Force -ErrorAction SilentlyContinue
+}
 Start-Process -FilePath "$INSTALL_DIR\panel.exe" -WorkingDirectory $INSTALL_DIR
+Start-Sleep -Seconds 4
+
+function Test-PostInstallStatus {
+    Write-Host ""
+    Write-Host "  Validating tunnel startup (up to 25s)..." -ForegroundColor Cyan
+
+    $authRejected = $false
+    $established = $false
+    $sdwanIP = $null
+
+    for ($i = 0; $i -lt 25; $i++) {
+        Start-Sleep -Seconds 1
+
+        if (Test-Path $logPath) {
+            $logText = Get-Content -Path $logPath -Tail 160 -ErrorAction SilentlyContinue | Out-String
+            if ($logText -match "AUTH REJECTED") { $authRejected = $true; break }
+            if ($logText -match "Authenticated successfully|Tunnel established|OPENACK received") { $established = $true }
+        }
+
+        try {
+            $ipObj = Get-NetIPAddress -InterfaceAlias "iwan1" -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($ipObj) { $sdwanIP = $ipObj.IPAddress }
+        } catch {}
+        if (-not $sdwanIP) {
+            $netsh = netsh interface ip show addresses "iwan1" 2>$null | Out-String
+            if ($netsh -match "IP Address:\s*([0-9\.]+)") { $sdwanIP = $Matches[1] }
+        }
+
+        if ($established -and $sdwanIP) { break }
+    }
+
+    if ($sdwanIP) {
+        Write-Host "  iwan1 IPv4: $sdwanIP" -ForegroundColor Green
+    } else {
+        Write-Host "  iwan1 IPv4 not detected yet" -ForegroundColor Yellow
+    }
+
+    if ($authRejected) {
+        Write-Host "  AUTH REJECTED: check username/password" -ForegroundColor Red
+    } elseif ($established) {
+        Write-Host "  Tunnel status: established" -ForegroundColor Green
+    } else {
+        Write-Host "  Tunnel status: timeout/unknown, check sdwan.log and panel.log" -ForegroundColor Yellow
+    }
+
+    $pingOk = $false
+    try {
+        $ping = & ping.exe -n 1 -w 2000 $TestHost 2>$null | Out-String
+        if ($LASTEXITCODE -eq 0) { $pingOk = $true }
+    } catch {}
+    if ($pingOk) {
+        Write-Host "  Internal connectivity: $TestHost reachable" -ForegroundColor Green
+    } else {
+        Write-Host "  Internal connectivity: $TestHost not reachable yet (warning only)" -ForegroundColor Yellow
+    }
+}
+
+Test-PostInstallStatus
 
 Write-Host ""
 Write-Host "===========================================" -ForegroundColor Cyan
