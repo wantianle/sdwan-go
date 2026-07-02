@@ -359,16 +359,16 @@ Start-Sleep -Seconds 4
 
 function Test-PostInstallStatus {
     Write-Host ""
-    Write-Host "  Validating tunnel startup (up to 30s)..." -ForegroundColor Cyan
+    Write-Host "  Validating tunnel startup (up to 15s)..." -ForegroundColor Cyan
 
     $authRejected = $false
     $established = $false
     $lastMarker = ""
     $sdwanIP = $null
 
-    for ($i = 0; $i -lt 30; $i++) {
+    for ($i = 0; $i -lt 15; $i++) {
         Start-Sleep -Seconds 1
-        Write-Host -NoNewline "`r  ... $i s / 30 s"
+        Write-Host -NoNewline "`r  ... $i s / 15 s"
 
         if (Test-Path $logPath) {
             $logText = Get-Content -Path $logPath -Tail 160 -ErrorAction SilentlyContinue | Out-String

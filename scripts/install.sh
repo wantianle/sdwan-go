@@ -291,15 +291,15 @@ verify() {
 # Returns: 0 = running, 1 = auth rejected, 2 = timeout/unknown.
 verify_tunnel() {
     echo "────────────── 状态检查 ──────────────"
-    echo -e "  等待隧道建立 (最多 30s)..."
+    echo -e "  等待隧道建立 (最多 15s)..."
 
     local auth_rejected=0
     local established=0
     local iwan_ok=0
 
-    for ((sec=1; sec<=30; sec++)); do
+    for ((sec=1; sec<=15; sec++)); do
         sleep 1
-        printf "\r  ... %2ds / 30s" "$sec"
+        printf "\r  ... %2ds / 15s" "$sec"
 
         # Scan logs for auth/tunnel markers (only latest wins)
         local logs=""
@@ -483,7 +483,7 @@ main() {
         show_postinstall_help
     else
         echo ""
-        echo -e "${Y}⚠️  隧道未能在 30s 内建立，请检查网络后手动重启:${NC}"
+        echo -e "${Y}⚠️  隧道未能在 15s 内建立，请检查网络后手动重启:${NC}"
         case "$OS" in
             linux)  echo "   sudo systemctl restart sdwan" ;;
             darwin) echo "   sudo launchctl kickstart -k system/com.sdwan.tunnel" ;;
