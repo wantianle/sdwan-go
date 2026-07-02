@@ -259,7 +259,7 @@ download_binary() {
                 [[ $pct -gt 100 ]] && pct=100
                 human_cur=$(bytes_human "$cur")
                 clear_download_line
-                printf "  [%d/%d] %-20s ... %d%% %s/%s" \
+                printf "  [%d/%d] %-20s %d%% %s/%s" \
                     "$i" "$total" "$label" "$pct" "$human_cur" "$human_total"
                 sleep 0.3
             done
@@ -273,14 +273,14 @@ download_binary() {
                 final_sz=$(file_size "$dest" 2>/dev/null || echo 0)
                 human_cur=$(bytes_human "$final_sz")
                 clear_download_line
-                printf "  [%d/%d] %-20s ... ${G}✅ %s${NC}\n" \
+                printf "  [%d/%d] %-20s ${G}✅ %s${NC}\n" \
                     "$i" "$total" "$label" "$human_cur"
                 chmod +x "$dest"
                 return 0
             else
                 rm -f "$dest"
                 clear_download_line
-                printf "  [%d/%d] %-20s ... ${Y}超时${NC}\n" \
+                printf "  [%d/%d] %-20s ${Y}超时${NC}\n" \
                     "$i" "$total" "$label"
             fi
         else
