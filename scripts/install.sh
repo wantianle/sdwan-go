@@ -285,9 +285,7 @@ EOF
 }
 
 # ────────────────────────────────────────────────────────────
-verify() {
-    echo ""
-# verify_tunnel polls the daemon logs/network state for up to 30s.
+# verify_tunnel polls the daemon logs/network state for up to 15s.
 # Returns: 0 = running, 1 = auth rejected, 2 = timeout/unknown.
 verify_tunnel() {
     echo "────────────── 状态检查 ──────────────"
@@ -295,7 +293,6 @@ verify_tunnel() {
 
     local auth_rejected=0
     local established=0
-    local iwan_ok=0
 
     for ((sec=1; sec<=15; sec++)); do
         sleep 1
@@ -321,14 +318,12 @@ verify_tunnel() {
         # Check iwan1 / utun
         if [[ "$OS" == "linux" ]]; then
             if ip link show iwan1 &>/dev/null; then
-                iwan_ok=1
                 if [[ $established -eq 1 ]]; then
                     break
                 fi
             fi
         else
             if ifconfig 2>/dev/null | grep -q "^utun" && ifconfig 2>/dev/null | awk '/^utun[0-9]+:/{found=1; next} /^[a-z]+[0-9]+:/{found=0} found && /inet /{print $2; exit}' | grep -q .; then
-                iwan_ok=1
                 if [[ $established -eq 1 ]]; then
                     break
                 fi
@@ -436,7 +431,6 @@ re_enter_credentials() {
         darwin) launchctl kickstart -k system/com.sdwan.tunnel 2>/dev/null || true ;;
     esac
     return 0
-}
 }
 
 # ────────────────────────────────────────────────────────────
