@@ -61,6 +61,7 @@ type SdwanManager struct {
 	autoConnecting  atomic.Bool
 	manualChangeSeq atomic.Uint64
 	lastAutoAttempt atomic.Int64
+	mtuApplying     bool
 	onStateChange   func() // optional callback for UI refresh
 }
 
@@ -365,6 +366,98 @@ func (m *SdwanManager) Reload() bool {
 	return true
 }
 
+// OptimizeMTU probes the configured server with Windows ping DF packets,
+// updates only the mtu= line in iwan.conf when needed, and restarts the daemon
+// by shutdown/start (not /v1/switch) so the new packet size is applied cleanly.
+func (m *SdwanManager) OptimizeMTU() map[string]interface{} {
+	m.mu.Lock()
+	if m.mtuApplying {
+		m.mu.Unlock()
+		return mtuResult(false, "正在优化 MTU，请稍候。")
+	}
+	m.mtuApplying = true
+	server := m.getCurrentServerName()
+	currentMTU, mtuErr := m.parseIwanMTU()
+	token := m.token
+	controlAddr := m.controlAddr
+	m.mu.Unlock()
+
+	defer func() {
+		m.mu.Lock()
+		m.mtuApplying = false
+		m.mu.Unlock()
+	}()
+
+	if server == "" || strings.HasPrefix(server, "节点 ") {
+		return mtuResult(false, "未找到当前服务器，未修改 MTU。")
+	}
+	if mtuErr != nil {
+		return mtuResult(false, fmt.Sprintf("读取当前 MTU 失败：%v，未修改。", mtuErr))
+	}
+
+	bestPayload, ok := probeMTUPayload(server)
+	if !ok {
+		return mtuResult(false, fmt.Sprintf("无法探测 %s 的 MTU，未修改。请检查网络或服务器是否允许 ping。", server))
+	}
+
+	detectedMTU := clampMTU(bestPayload + 28 - 64)
+	if detectedMTU == currentMTU {
+		return map[string]interface{}{
+			"ok":      true,
+			"changed": false,
+			"mtu":     detectedMTU,
+			"message": fmt.Sprintf("当前 MTU 已是 %d，无需调整。", detectedMTU),
+		}
+	}
+
+	if err := m.rewriteIwanMTU(detectedMTU); err != nil {
+		return mtuResult(false, fmt.Sprintf("写入 MTU 失败：%v，未修改。", err))
+	}
+
+	m.mu.Lock()
+	m.state = "reconnecting"
+	m.connected = false
+	m.mu.Unlock()
+	if m.onStateChange != nil {
+		m.onStateChange()
+	}
+
+	if token != "" {
+		log.Println("[PANEL] Applying MTU: graceful daemon shutdown")
+		if err := postControlShutdown(controlAddr, token); err != nil {
+			log.Printf("[PANEL] MTU shutdown request failed: %v", err)
+		}
+	}
+	released := m.waitDaemonRelease(controlAddr, token)
+	if !released {
+		return map[string]interface{}{
+			"ok":      false,
+			"changed": true,
+			"mtu":     detectedMTU,
+			"message": fmt.Sprintf("MTU 已改为 %d，但旧连接还未释放，请稍后手动重连。", detectedMTU),
+		}
+	}
+	restarted := m.ensureDaemonRunning()
+	if !restarted {
+		return map[string]interface{}{
+			"ok":      false,
+			"changed": true,
+			"mtu":     detectedMTU,
+			"message": fmt.Sprintf("MTU 已改为 %d，但重连未完成，请稍后手动连接。", detectedMTU),
+		}
+	}
+	if m.onStateChange != nil {
+		m.onStateChange()
+	}
+	return map[string]interface{}{
+		"ok":      true,
+		"changed": true,
+		"old_mtu": currentMTU,
+		"mtu":     detectedMTU,
+		"message": fmt.Sprintf("MTU 已从 %d 优化为 %d，并已重新连接。", currentMTU, detectedMTU),
+	}
+}
+
 // AutoConnect ensures the daemon is running and connected on the configured
 // server. This is called on panel startup and when the panel is shown.
 func (m *SdwanManager) AutoConnect() {
@@ -405,6 +498,47 @@ func hiddenCommand(name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd
+}
+
+func mtuResult(ok bool, message string) map[string]interface{} {
+	return map[string]interface{}{
+		"ok":      ok,
+		"changed": false,
+		"message": message,
+	}
+}
+
+func clampMTU(mtu int) int {
+	if mtu < 1200 {
+		return 1200
+	}
+	if mtu > 1436 {
+		return 1436
+	}
+	return mtu
+}
+
+func probeMTUPayload(host string) (int, bool) {
+	lo, hi := 548, 1472
+	best := 0
+	for lo <= hi {
+		mid := lo + (hi-lo)/2
+		if pingPayload(host, mid) {
+			best = mid
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	if best == 0 {
+		return 0, false
+	}
+	return best, true
+}
+
+func pingPayload(host string, payload int) bool {
+	cmd := hiddenCommand("ping.exe", "-4", "-f", "-l", strconv.Itoa(payload), "-n", "1", "-w", "1000", host)
+	return cmd.Run() == nil
 }
 
 // ResumeProbes unpauses the latency probe and fires an immediate probe cycle.
@@ -1031,6 +1165,76 @@ func (m *SdwanManager) ParseIwanServer() string {
 		}
 	}
 	return ""
+}
+
+func (m *SdwanManager) parseIwanMTU() (int, error) {
+	f, err := os.Open(m.iwanPath)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) != "mtu" {
+			continue
+		}
+		mtu, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil || mtu <= 0 {
+			return 0, fmt.Errorf("mtu 配置无效")
+		}
+		return mtu, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+	return 0, fmt.Errorf("未找到 mtu= 配置")
+}
+
+func (m *SdwanManager) rewriteIwanMTU(mtu int) error {
+	data, err := os.ReadFile(m.iwanPath)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "mtu=") || strings.HasPrefix(trimmed, "mtu ") {
+			lines[i] = fmt.Sprintf("mtu=%d", mtu)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("未找到 mtu= 配置")
+	}
+	return os.WriteFile(m.iwanPath, []byte(strings.Join(lines, "\n")), 0644)
+}
+
+func (m *SdwanManager) waitDaemonRelease(controlAddr, token string) bool {
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		cmdRunning := m.daemonCmd != nil
+		m.mu.Unlock()
+		apiReleased := true
+		if token != "" {
+			if _, err := getControlStatus(controlAddr, token); err == nil {
+				apiReleased = false
+			}
+		}
+		if !cmdRunning && apiReleased {
+			return true
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return false
 }
 
 func (m *SdwanManager) getCurrentServerName() string {

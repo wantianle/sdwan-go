@@ -58,6 +58,10 @@ func (a *App) Reload() bool {
 	return a.manager.Reload()
 }
 
+func (a *App) OptimizeMTU() map[string]interface{} {
+	return a.manager.OptimizeMTU()
+}
+
 func (a *App) HidePanel() {
 	// Suspend probes when panel is hidden — no point wasting CPU
 	a.manager.SuspendProbes()

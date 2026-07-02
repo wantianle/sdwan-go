@@ -145,10 +145,61 @@ select_server() {
 }
 
 # ────────────────────────────────────────────────────────────
+# probe_mtu uses binary search (548..1472) to find the largest
+# IPv4 ICMP echo payload that passes with the DF bit set.
+# Returns the tunnel MTU (payload + 28 - 64, clamped [1200,1436]).
+# All output goes to stderr; only the MTU integer goes to stdout.
+probe_mtu() {
+    local server="$1"
+    local low=548 high=1472 best=0 mid
+
+    echo -e "${B}⏳ 自动探测 MTU (${server})...${NC}" >&2
+
+    # choose ping flags per OS
+    case "$OS" in
+        linux)   local do_flag="do" ;;
+        darwin)  local do_flag="" ;;
+    esac
+
+    # binary search — at most ceil(log2(1472-548+1)) ≃ 10 rounds
+    while [[ $low -le $high ]]; do
+        mid=$(( (low + high) / 2 ))
+        local -a _ping_args=()
+        case "$OS" in
+            linux)  _ping_args=(-4 -M "$do_flag" -s "$mid" -c 1 -W 1 "$server") ;;
+            darwin) _ping_args=(-4 -D -s "$mid" -c 1 -W 1000 "$server") ;;
+        esac
+        if ping "${_ping_args[@]}" >/dev/null 2>&1; then
+            best=$mid
+            low=$(( mid + 1 ))
+            printf "." >&2
+        else
+            high=$(( mid - 1 ))
+            printf "," >&2
+        fi
+    done
+    echo "" >&2  # end the progress-dot line
+
+    if [[ $best -eq 0 ]]; then
+        echo -e "${Y}⚠️  MTU 探测未成功 — 使用默认值 1436（非致命警告）${NC}" >&2
+        echo "1436"
+        return
+    fi
+
+    local candidate=$(( best + 28 - 64 ))
+    [[ $candidate -lt 1200 ]] && candidate=1200
+    [[ $candidate -gt 1436 ]] && candidate=1436
+
+    echo -e "${G}✅ 探测到最佳 MTU: ${candidate}（最大有效载荷=${best} bytes）${NC}" >&2
+    echo "$candidate"
+}
+
+# ────────────────────────────────────────────────────────────
 write_config() {
     local server="$1"
     local username="$2"
     local password="$3"
+    local mtu="${4:-1436}"
 
     mkdir -p "$CONFIG_DIR"
 
@@ -165,7 +216,7 @@ server=$server
 username=$username
 password=$password
 port=10010
-mtu=1436
+mtu=$mtu
 encrypt=0
 tunname=iwan1
 routenet=192.168.0.0/16
@@ -510,7 +561,13 @@ re_enter_credentials() {
         [[ -n "$PASSWORD" ]] && break
         echo -e "${Y}密码不能为空${NC}"
     done
-    write_config "$SERVER" "$USERNAME" "$PASSWORD"
+
+    # preserve the probed/chosen MTU from the existing config
+    local mtu
+    mtu=$(awk -F= '/^mtu=/{print $2}' "$CONFIG_FILE" 2>/dev/null || true)
+    [[ -z "$mtu" || ! "$mtu" =~ ^[0-9]+$ ]] && mtu=1436
+
+    write_config "$SERVER" "$USERNAME" "$PASSWORD" "$mtu"
     echo -e "${G}  配置已更新，重启服务...${NC}"
     case "$OS" in
         linux)  systemctl restart sdwan ;;
@@ -543,7 +600,10 @@ main() {
         echo -e "${Y}密码不能为空，请重新输入${NC}"
     done
 
-    write_config "$SERVER" "$USERNAME" "$PASSWORD"
+    # auto-probe the tunnel MTU before writing config
+    PROBED_MTU=$(probe_mtu "$SERVER")
+
+    write_config "$SERVER" "$USERNAME" "$PASSWORD" "$PROBED_MTU"
 
     case "$OS" in
         linux)  install_linux_service ;;

@@ -60,9 +60,14 @@ func RunOnce(configPath string) error {
 	// Store baseline TUN config so SwitchServer can validate compatibility.
 	client.SetTunnelConfig(tunCfg)
 
-	// Override config MTU if server sent one
+	// Effective MTU = min(configured, server advertised); never raise a
+	// configured MTU that is lower than what the server proposes.
+	// Preserve legacy (<=0) forward-compat: still use the server value.
 	if tunCfg.MTU > 0 {
-		cfg.MTU = int(tunCfg.MTU)
+		serverMTU := int(tunCfg.MTU)
+		if cfg.MTU <= 0 || serverMTU < cfg.MTU {
+			cfg.MTU = serverMTU
+		}
 	}
 
 	// 5. Create TUN, assign IP, add route (with retry + cleanup wiring)
@@ -166,7 +171,10 @@ func tryStartup(client *Client, cfg *Config) {
 
 		client.SetTunnelConfig(tunCfg)
 		if tunCfg.MTU > 0 {
-			cfg.MTU = int(tunCfg.MTU)
+			serverMTU := int(tunCfg.MTU)
+			if cfg.MTU <= 0 || serverMTU < cfg.MTU {
+				cfg.MTU = serverMTU
+			}
 		}
 
 		// 4. Setup TUN

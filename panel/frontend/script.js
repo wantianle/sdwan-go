@@ -5,11 +5,14 @@ const statusLatency = document.getElementById('status-latency');
 const toggleInput   = document.getElementById('toggle-connection');
 const serverListEl  = document.getElementById('server-list');
 const closeButton   = document.getElementById('btn-close');
+const mtuButton     = document.getElementById('btn-mtu');
+const mtuStatus     = document.getElementById('mtu-status');
 
 // ---- State ----
 let currentServerId = '';
 let pollTimer = null;
 let switchingServerId = '';
+let optimizingMTU = false;
 
 // ---- Init ----
 document.addEventListener('DOMContentLoaded', () => {
@@ -47,6 +50,8 @@ document.addEventListener('DOMContentLoaded', () => {
       refreshServers();
     });
   });
+
+  mtuButton.addEventListener('click', optimizeMTU);
 
   closeButton.addEventListener('click', hidePanel);
 });
@@ -88,6 +93,34 @@ function stopPolling() {
 function hidePanel() {
   stopPolling();
   window.go.main.App.HidePanel();
+}
+
+function optimizeMTU() {
+  if (optimizingMTU) return;
+  optimizingMTU = true;
+  mtuButton.disabled = true;
+  mtuButton.classList.add('busy');
+  setMTUStatus('检测中...', 'working');
+  updateConnectionUI(false, 'reconnecting');
+
+  window.go.main.App.OptimizeMTU().then(result => {
+    const msg = (result && result.message) || 'MTU 优化完成。';
+    setMTUStatus(msg, result && result.ok ? 'success' : 'error');
+    refreshStatus();
+    refreshServers();
+  }).catch(() => {
+    setMTUStatus('MTU 优化失败，配置未修改。', 'error');
+    refreshStatus();
+  }).finally(() => {
+    optimizingMTU = false;
+    mtuButton.disabled = false;
+    mtuButton.classList.remove('busy');
+  });
+}
+
+function setMTUStatus(text, tone) {
+  mtuStatus.textContent = text;
+  mtuStatus.className = 'inline-status ' + (tone || '');
 }
 
 // ---- UI updaters ----

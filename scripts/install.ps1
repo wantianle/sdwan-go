@@ -230,6 +230,44 @@ if (-not (Test-Path $trayIconPath)) {
 }
 
 # ────────────────────────────────────────────────────────────
+# Probe-MTU: binary search (548..1472) the largest IPv4 ICMP
+# echo payload that passes with the DF bit set.
+# Returns the tunnel MTU (payload + 28 - 64, clamped [1200,1436]).
+function Probe-MTU {
+    param([string]$Server)
+
+    Write-Host "  Auto-probing MTU ($Server)..." -ForegroundColor Cyan
+
+    $low = 548
+    $high = 1472
+    $best = 0
+
+    while ($low -le $high) {
+        $mid = [math]::Floor(($low + $high) / 2)
+        $pingArgs = @("-4", "-f", "-l", "$mid", "-n", "1", "-w", "1000", $Server)
+        & ping.exe $pingArgs 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $best = $mid
+            $low = $mid + 1
+        } else {
+            $high = $mid - 1
+        }
+    }
+
+    if ($best -eq 0) {
+        Write-Host "  MTU probe failed — using default 1436 (non-fatal warning)" -ForegroundColor Yellow
+        return 1436
+    }
+
+    $candidate = $best + 28 - 64
+    if ($candidate -lt 1200) { $candidate = 1200 }
+    if ($candidate -gt 1436) { $candidate = 1436 }
+
+    Write-Host "  MTU probe OK: $candidate (max payload=$best)" -ForegroundColor Green
+    return $candidate
+}
+
+# ────────────────────────────────────────────────────────────
 # 3. Server selection
 # ────────────────────────────────────────────────────────────
 $configPath = "$INSTALL_DIR\iwan.conf"
@@ -293,12 +331,14 @@ if ($useExistingConfig) {
         }
     } while ([string]::IsNullOrWhiteSpace($passwordPlain))
 
+    $probedMtu = Probe-MTU -Server $selectedServer
+
     $configContent = @"
 server=$selectedServer
 username=$username
 password=$passwordPlain
 port=10010
-mtu=1436
+mtu=$probedMtu
 encrypt=0
 tunname=iwan1
 routenet=192.168.0.0/16

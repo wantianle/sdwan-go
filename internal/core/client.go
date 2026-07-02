@@ -952,10 +952,14 @@ func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
 		return nil, fmt.Errorf("switch: tunnel reconfig: %w", err)
 	}
 
-	// Override config MTU before publishing nextCfg so readers never observe
-	// the pre-OPENACK effective MTU after the switch is committed.
+	// Effective MTU = min(configured, server advertised); never raise a
+	// configured MTU that is lower than what the server proposes.
+	// Preserve legacy (<=0) forward-compat: still use the server value.
 	if tunCfg.MTU > 0 {
-		nextCfg.MTU = int(tunCfg.MTU)
+		serverMTU := int(tunCfg.MTU)
+		if nextCfg.MTU <= 0 || serverMTU < nextCfg.MTU {
+			nextCfg.MTU = serverMTU
+		}
 	}
 
 	// e+f) atomically swap session + config

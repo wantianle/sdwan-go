@@ -302,7 +302,7 @@ input:checked + .slider::before {
 .actions {
   display: flex;
   justify-content: center;
-  gap: 12px;
+  gap: 8px;
   flex-shrink: 0;
 }
 
@@ -326,4 +326,34 @@ input:checked + .slider::before {
 
 .action-btn:active {
   background: #eef2f7;
+}
+
+.action-btn:disabled,
+.action-btn.busy {
+  color: #7c8796;
+  background: #f3f5f8;
+  border-color: #d9dde4;
+  cursor: wait;
+}
+
+.inline-status {
+  min-height: 16px;
+  margin-top: -6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: #6b7280;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.inline-status.working {
+  color: #b45309;
+}
+
+.inline-status.success {
+  color: #166534;
+}
+
+.inline-status.error {
+  color: #b42318;
 }

@@ -23,6 +23,13 @@ func CreateTUN(name string, mtu int, _ string) (*water.Interface, error) {
 		return nil, fmt.Errorf("create utun: %w", err)
 	}
 
+	// Apply the requested MTU to the actual utun interface.
+	out, err := exec.Command("ifconfig", iface.Name(), "mtu", fmt.Sprintf("%d", mtu)).CombinedOutput()
+	if err != nil {
+		iface.Close()
+		return nil, fmt.Errorf("set MTU %d on %s: %w (output: %s)", mtu, iface.Name(), err, string(out))
+	}
+
 	return iface, nil
 }
 
