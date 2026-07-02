@@ -407,10 +407,13 @@ function Test-PostInstallStatus {
     }
 
     $pingOk = $false
-    try {
-        $ping = & ping.exe -n 1 -w 2000 $TestHost 2>$null | Out-String
-        if ($LASTEXITCODE -eq 0) { $pingOk = $true }
-    } catch {}
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        if ($attempt -gt 0) { Start-Sleep -Seconds 1 }
+        try {
+            $ping = & ping.exe -n 1 -w 3000 $TestHost 2>$null | Out-String
+            if ($LASTEXITCODE -eq 0) { $pingOk = $true; break }
+        } catch {}
+    }
     if ($pingOk) {
         Write-Host "  Internal connectivity: $TestHost reachable" -ForegroundColor Green
     } else {

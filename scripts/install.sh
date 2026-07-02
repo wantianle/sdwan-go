@@ -336,18 +336,19 @@ verify() {
         echo -e "  认证/隧道:${Y} 状态未知，请稍后查看日志${NC}"
     fi
 
-    if [[ "$OS" == "linux" ]]; then
-        if ping -c 1 -W 2 "$TEST_HOST" >/dev/null 2>&1; then
-            echo -e "  内网测试: ${G}$TEST_HOST 可达${NC}"
-        else
-            echo -e "  内网测试: ${Y}$TEST_HOST 暂不可达 (警告，不影响安装)${NC}"
+    # Ping 3 times with 1s gaps — route may need a moment to take effect
+    ping_ok=0
+    for _ in 1 2 3; do
+        sleep 1
+        if ping -c 1 -W 3 "$TEST_HOST" >/dev/null 2>&1; then
+            ping_ok=1
+            break
         fi
+    done
+    if [ "$ping_ok" -eq 1 ]; then
+        echo -e "  内网测试: ${G}$TEST_HOST 可达${NC}"
     else
-        if ping -c 1 -W 2000 "$TEST_HOST" >/dev/null 2>&1; then
-            echo -e "  内网测试: ${G}$TEST_HOST 可达${NC}"
-        else
-            echo -e "  内网测试: ${Y}$TEST_HOST 暂不可达 (警告，不影响安装)${NC}"
-        fi
+        echo -e "  内网测试: ${Y}$TEST_HOST 暂不可达 (警告，不影响安装)${NC}"
     fi
 
     echo "──────────────────────────────────────"
