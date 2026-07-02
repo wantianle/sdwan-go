@@ -653,7 +653,18 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 	}
 
 	// Guard: if a daemon is already running or starting, just poll.
+	// But first make sure we have the token; the panel may have been
+	// restarted fresh while the daemon kept running.
 	if alreadyStarted {
+		if token == "" {
+			var tokErr error
+			m.token, tokErr = loadOrGenerateToken(m.tokenPath)
+			if tokErr != nil {
+				log.Printf("[DAEMON] Token load failed on already-started poll: %v", tokErr)
+				return false
+			}
+			token = m.token
+		}
 		return m.pollDaemonReady(token, controlAddr)
 	}
 
@@ -664,6 +675,19 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 		m.mu.Unlock()
 		return m.pollDaemonReady(token, controlAddr)
 	}
+
+	// Generate or load the control token BEFORE starting daemon,
+	// so both panel and daemon share the same token. Without this
+	// pollDaemonReady below gets an empty token and silently fails.
+	var tokErr error
+	m.token, tokErr = loadOrGenerateToken(m.tokenPath)
+	if tokErr != nil {
+		log.Printf("[DAEMON] Token generation failed: %v", tokErr)
+		m.mu.Unlock()
+		return false
+	}
+	token = m.token
+	log.Printf("[DAEMON] Token ready, starting daemon at %s", controlAddr)
 
 	m.daemonStarting = true
 	m.startDaemon()
@@ -690,8 +714,10 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 // API. It acquires m.mu only briefly to update m.connected.
 func (m *SdwanManager) pollDaemonReady(token, controlAddr string) bool {
 	if token == "" {
+		log.Println("[DAEMON] pollDaemonReady: empty token, cannot poll")
 		return false
 	}
+	log.Printf("[DAEMON] pollDaemonReady: waiting for daemon at %s", controlAddr)
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(1 * time.Second)
@@ -701,6 +727,7 @@ func (m *SdwanManager) pollDaemonReady(token, controlAddr string) bool {
 			m.connected = true
 			m.daemonStarting = false
 			m.mu.Unlock()
+			log.Println("[DAEMON] Daemon is ready, starting poller")
 			m.startDaemonPoller()
 			return true
 		}
@@ -715,6 +742,7 @@ func (m *SdwanManager) startDaemonPoller() {
 	if !m.daemonPollerOn.CompareAndSwap(false, true) {
 		return
 	}
+	log.Println("[POLL] Daemon poller started")
 
 	go func() {
 		defer m.daemonPollerOn.Store(false)
@@ -757,8 +785,11 @@ func (m *SdwanManager) pollDaemonStatusOnce() {
 	changed := wasState != m.state
 	m.mu.Unlock()
 
-	if changed && m.onStateChange != nil {
-		m.onStateChange()
+	if changed {
+		log.Printf("[POLL] State changed: %s → %s", wasState, m.state)
+		if m.onStateChange != nil {
+			m.onStateChange()
+		}
 	}
 }
 
