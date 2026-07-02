@@ -287,25 +287,64 @@ EOF
 # ────────────────────────────────────────────────────────────
 verify() {
     echo ""
+# verify_tunnel polls the daemon logs/network state for up to 30s.
+# Returns: 0 = running, 1 = auth rejected, 2 = timeout/unknown.
+verify_tunnel() {
     echo "────────────── 状态检查 ──────────────"
-    echo -e "  等待隧道建立..."
-    sleep 6
+    echo -e "  等待隧道建立 (最多 30s)..."
 
-    local logs=""
-    if [[ "$OS" == "linux" ]]; then
-        logs=$(journalctl -u sdwan -n 120 --no-pager 2>/dev/null || true)
-    else
-        logs=$(tail -n 120 /var/log/sdwan.log 2>/dev/null || true)
-    fi
+    local auth_rejected=0
+    local established=0
+    local iwan_ok=0
 
+    for ((sec=1; sec<=30; sec++)); do
+        sleep 1
+        printf "\r  ... %2ds / 30s" "$sec"
+
+        # Scan logs for auth/tunnel markers (only latest wins)
+        local logs=""
+        if [[ "$OS" == "linux" ]]; then
+            logs=$(journalctl -u sdwan -n 60 --no-pager 2>/dev/null || true)
+        else
+            logs=$(tail -n 60 /var/log/sdwan.log 2>/dev/null || true)
+        fi
+        local auth_marker
+        auth_marker=$(printf '%s\n' "$logs" | grep -Ei "AUTH REJECTED|Authenticated successfully|Tunnel established|OPENACK received" | tail -n 1 || true)
+
+        if printf '%s\n' "$auth_marker" | grep -qi "AUTH REJECTED"; then
+            auth_rejected=1
+            break
+        elif [[ -n "$auth_marker" ]]; then
+            established=1
+        fi
+
+        # Check iwan1 / utun
+        if [[ "$OS" == "linux" ]]; then
+            if ip link show iwan1 &>/dev/null; then
+                iwan_ok=1
+                if [[ $established -eq 1 ]]; then
+                    break
+                fi
+            fi
+        else
+            if ifconfig 2>/dev/null | grep -q "^utun" && ifconfig 2>/dev/null | awk '/^utun[0-9]+:/{found=1; next} /^[a-z]+[0-9]+:/{found=0} found && /inet /{print $2; exit}' | grep -q .; then
+                iwan_ok=1
+                if [[ $established -eq 1 ]]; then
+                    break
+                fi
+            fi
+        fi
+    done
+    printf "\r%30s\r" ""  # clear the progress line
+
+    # ── report results ──
     if [[ "$OS" == "linux" ]]; then
         if ip link show iwan1 &>/dev/null; then
             echo -e "  虚拟网卡: ${G}iwan1 已创建${NC}"
             ip -4 addr show iwan1 2>/dev/null | grep "inet " | awk '{print "  └─ IP: " $2}' || true
         else
-            echo -e "  虚拟网卡: ${Y}iwan1 尚未出现 (请稍候)${NC}"
+            echo -e "  虚拟网卡: ${Y}iwan1 未出现${NC}"
         fi
-
         if ip route 2>/dev/null | grep -q "192.168.0.0/16.*iwan1"; then
             echo -e "  路由:     ${G}192.168.0.0/16 → iwan1${NC}"
         else
@@ -318,9 +357,8 @@ verify() {
             echo -e "  虚拟网卡: ${G}utun 已创建${NC}"
             echo "  └─ IP: $darwin_ip"
         else
-            echo -e "  虚拟网卡: ${Y}utun IP 尚未出现 (请稍候)${NC}"
+            echo -e "  虚拟网卡: ${Y}utun IP 未出现${NC}"
         fi
-
         if route -n get 192.168.0.0 2>/dev/null | grep -q 'interface: utun'; then
             echo -e "  路由:     ${G}192.168.0.0/16 → utun${NC}"
         else
@@ -328,18 +366,21 @@ verify() {
         fi
     fi
 
-    local auth_marker=""
-    auth_marker=$(printf '%s\n' "$logs" | grep -Ei "AUTH REJECTED|Authenticated successfully|Tunnel established|OPENACK received" | tail -n 1 || true)
-    if printf '%s\n' "$auth_marker" | grep -qi "AUTH REJECTED"; then
+    # Auth
+    if [[ $auth_rejected -eq 1 ]]; then
         echo -e "  认证:     ${R}失败，用户名或密码错误 (AUTH REJECTED)${NC}"
-    elif [[ -n "$auth_marker" ]]; then
+        echo "──────────────────────────────────────"
+        return 1
+    elif [[ $established -eq 1 ]]; then
         echo -e "  认证/隧道:${G} 已建立${NC}"
     else
-        echo -e "  认证/隧道:${Y} 状态未知，请稍后查看日志${NC}"
+        echo -e "  认证/隧道:${Y} 超时未建立，请检查网络和配置${NC}"
+        echo "──────────────────────────────────────"
+        return 2
     fi
 
     # Ping 3 times with 1s gaps — route may need a moment to take effect
-    ping_ok=0
+    local ping_ok=0
     for _ in 1 2 3; do
         sleep 1
         if ping -c 1 -W 3 "$TEST_HOST" >/dev/null 2>&1; then
@@ -354,6 +395,11 @@ verify() {
     fi
 
     echo "──────────────────────────────────────"
+    return 0
+}
+
+# show_postinstall_help prints the post-install management commands.
+show_postinstall_help() {
     echo ""
     echo -e "${G}✅ 安装完成！${NC}"
     echo ""
@@ -365,6 +411,32 @@ verify() {
     echo "   tail -f /var/log/sdwan.log        # 实时日志 (macOS)"
     echo ""
     echo -e "${Y}💡 修改配置: sudo nano /etc/sdwan/iwan.conf && sudo systemctl restart sdwan${NC}"
+}
+
+# re_enter_credentials prompts the user to re-enter username/password,
+# rewrites the config, and restarts the service.
+re_enter_credentials() {
+    echo ""
+    echo -e "${Y}━━━ 重新输入账号密码 ━━━${NC}"
+    while true; do
+        read -rp "👤 工号 (username): " USERNAME </dev/tty
+        [[ -n "${USERNAME//[[:space:]]/}" ]] && break
+        echo -e "${Y}用户名不能为空${NC}"
+    done
+    while true; do
+        read -rsp "🔑 密码 (password): " PASSWORD </dev/tty
+        echo
+        [[ -n "$PASSWORD" ]] && break
+        echo -e "${Y}密码不能为空${NC}"
+    done
+    write_config "$SERVER" "$USERNAME" "$PASSWORD"
+    echo -e "${G}  配置已更新，重启服务...${NC}"
+    case "$OS" in
+        linux)  systemctl restart sdwan ;;
+        darwin) launchctl kickstart -k system/com.sdwan.tunnel 2>/dev/null || true ;;
+    esac
+    return 0
+}
 }
 
 # ────────────────────────────────────────────────────────────
@@ -398,7 +470,25 @@ main() {
         darwin) install_macos_service ;;
     esac
 
-    verify
+    # Verify tunnel; if AUTH REJECTED, offer credential re-entry.
+    verify_tunnel
+    local vresult=$?
+    while [[ $vresult -eq 1 ]]; do
+        re_enter_credentials
+        verify_tunnel
+        vresult=$?
+    done
+
+    if [[ $vresult -eq 0 ]]; then
+        show_postinstall_help
+    else
+        echo ""
+        echo -e "${Y}⚠️  隧道未能在 30s 内建立，请检查网络后手动重启:${NC}"
+        case "$OS" in
+            linux)  echo "   sudo systemctl restart sdwan" ;;
+            darwin) echo "   sudo launchctl kickstart -k system/com.sdwan.tunnel" ;;
+        esac
+    fi
 }
 
 main "$@"

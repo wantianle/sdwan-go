@@ -359,15 +359,16 @@ Start-Sleep -Seconds 4
 
 function Test-PostInstallStatus {
     Write-Host ""
-    Write-Host "  Validating tunnel startup (up to 25s)..." -ForegroundColor Cyan
+    Write-Host "  Validating tunnel startup (up to 30s)..." -ForegroundColor Cyan
 
     $authRejected = $false
     $established = $false
     $lastMarker = ""
     $sdwanIP = $null
 
-    for ($i = 0; $i -lt 25; $i++) {
+    for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Seconds 1
+        Write-Host -NoNewline "`r  ... $i s / 30 s"
 
         if (Test-Path $logPath) {
             $logText = Get-Content -Path $logPath -Tail 160 -ErrorAction SilentlyContinue | Out-String
@@ -389,21 +390,28 @@ function Test-PostInstallStatus {
             if ($netsh -match "IP Address:\s*([0-9\.]+)") { $sdwanIP = $Matches[1] }
         }
 
-        if ($established -and $sdwanIP) { break }
+        # Stop waiting if tunnel is established and iwan1 appears
+        if ($established -and $sdwanIP) {
+            Write-Host ""
+            break
+        }
     }
+    Write-Host "`r                              `r" -NoNewline  # clear progress line
 
     if ($sdwanIP) {
         Write-Host "  iwan1 IPv4: $sdwanIP" -ForegroundColor Green
     } else {
-        Write-Host "  iwan1 IPv4 not detected yet" -ForegroundColor Yellow
+        Write-Host "  iwan1 IPv4 not detected" -ForegroundColor Yellow
     }
 
     if ($authRejected) {
         Write-Host "  AUTH REJECTED: check username/password" -ForegroundColor Red
+        return 1   # auth rejected
     } elseif ($established) {
         Write-Host "  Tunnel status: established" -ForegroundColor Green
     } else {
-        Write-Host "  Tunnel status: timeout/unknown, check sdwan.log and panel.log" -ForegroundColor Yellow
+        Write-Host "  Tunnel status: timeout/unknown" -ForegroundColor Yellow
+        return 2   # timeout
     }
 
     $pingOk = $false
@@ -419,13 +427,82 @@ function Test-PostInstallStatus {
     } else {
         Write-Host "  Internal connectivity: $TestHost not reachable yet (warning only)" -ForegroundColor Yellow
     }
+    return 0   # ok
 }
 
-Test-PostInstallStatus
+function ReEnterCredentials {
+    Write-Host ""
+    Write-Host "--- Re-enter credentials ---" -ForegroundColor Yellow
+
+    # Kill panel and daemon so old process doesn't hold old credentials
+    Write-Host "  Stopping existing tunnel..." -ForegroundColor Gray
+    & taskkill /f /im panel.exe 2>$null | Out-Null
+    & taskkill /f /im sdwan-windows-amd64.exe 2>$null | Out-Null
+    Start-Sleep -Seconds 2
+
+    do {
+        $Username = Read-Host -Prompt "  Username"
+        if ([string]::IsNullOrWhiteSpace($Username)) {
+            Write-Host "  Username cannot be empty" -ForegroundColor Yellow
+        }
+    } while ([string]::IsNullOrWhiteSpace($Username))
+
+    do {
+        $Password = Read-Host -Prompt "  Password" -AsSecureString
+        $PasswordPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
+        )
+        if ([string]::IsNullOrWhiteSpace($PasswordPlain)) {
+            Write-Host "  Password cannot be empty" -ForegroundColor Yellow
+        }
+    } while ([string]::IsNullOrWhiteSpace($PasswordPlain))
+
+    # Update iwan.conf
+    $iwanPath = Join-Path $INSTALL_DIR "iwan.conf"
+    if (Test-Path $iwanPath) {
+        $lines = Get-Content $iwanPath
+        $newLines = @()
+        foreach ($line in $lines) {
+            if ($line -match '^username\s*=') {
+                $newLines += "username=$Username"
+            } elseif ($line -match '^password\s*=') {
+                $newLines += "password=$PasswordPlain"
+            } else {
+                $newLines += $line
+            }
+        }
+        $newLines | Set-Content $iwanPath -Encoding UTF8
+    }
+
+    Write-Host "  Credentials updated, restarting panel..." -ForegroundColor Green
+
+    # Rotate log before restart
+    if (Test-Path $logPath) {
+        Move-Item -Path $logPath -Destination "$logPath.old" -Force -ErrorAction SilentlyContinue
+    }
+
+    Start-Process -FilePath "$INSTALL_DIR\panel.exe" -WorkingDirectory $INSTALL_DIR
+    return 0
+}
+
+$result = Test-PostInstallStatus
+while ($result -eq 1) {
+    $reply = Read-Host -Prompt "  AUTH REJECTED - re-enter credentials? (y/n)"
+    if ($reply -match '^[yY]') {
+        ReEnterCredentials
+        $result = Test-PostInstallStatus
+    } else {
+        break
+    }
+}
 
 Write-Host ""
 Write-Host "===========================================" -ForegroundColor Cyan
-Write-Host "  Install complete!" -ForegroundColor Green
+if ($result -eq 0) {
+    Write-Host "  Install complete!" -ForegroundColor Green
+} else {
+    Write-Host "  Install complete (tunnel may need attention)" -ForegroundColor Yellow
+}
 Write-Host ""
 Write-Host "  Tray icon should appear shortly." -ForegroundColor White
 Write-Host "  Double-click tray icon to open panel." -ForegroundColor White
