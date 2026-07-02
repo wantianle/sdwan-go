@@ -176,6 +176,29 @@ EOF
 }
 
 # ────────────────────────────────────────────────────────────
+# Helper: portable file size in bytes (macOS → BSD stat, Linux → GNU stat, fallback → wc)
+file_size() {
+    local f="$1"
+    [[ -f "$f" ]] || { echo 0; return; }
+    stat -f%z "$f" 2>/dev/null || stat -c%s "$f" 2>/dev/null || { wc -c < "$f" | tr -d ' '; }
+}
+
+# Helper: human-readable byte count
+bytes_human() {
+    local b=$1
+    (( b > 0 )) || { echo "0B"; return; }
+    if (( b >= 1073741824 )); then
+        awk "BEGIN {printf \"%.1fG\", $b/1073741824}"
+    elif (( b >= 1048576 )); then
+        awk "BEGIN {printf \"%.1fM\", $b/1048576}"
+    elif (( b >= 1024 )); then
+        awk "BEGIN {printf \"%.1fK\", $b/1024}"
+    else
+        echo "${b}B"
+    fi
+}
+
+# ────────────────────────────────────────────────────────────
 download_binary() {
     local binary="$1"
     local release_url
@@ -192,7 +215,7 @@ download_binary() {
     local -a urls=()
     for mirror in "${GH_PROXIES[@]}"; do
         local name="${mirror#*://}"; name="${name%/}"  # "ghproxy.com"
-        urls+=("${mirror}${release_url} (${name})" )
+        urls+=("${mirror}${release_url} (${name})")
     done
     urls+=("$release_url (direct)")
 
@@ -203,13 +226,68 @@ download_binary() {
         local url="${entry% (*}"
         local label="${entry##*(}"
         label="${label%)}"
-        printf "  [%d/%d] %-20s ... " "$i" "$total" "$label"
-        if curl -fsSL --connect-timeout 5 --max-time 60 "$url" -o "$dest" 2>/dev/null; then
-            echo -e "${G}✅ $(du -h "$dest" | cut -f1)${NC}"
-            chmod +x "$dest"
-            return 0
+
+        # ── discover total size via HEAD (follow redirects) ──
+        local total_size=0 headers
+        headers=$(curl -fsSLI --connect-timeout 5 --max-time 10 "$url" 2>/dev/null || true)
+        total_size=$(printf '%s\n' "$headers" | grep -i '^Content-Length:' | tail -1 | awk '{print $2}' | tr -d '\r')
+        if [[ -z "$total_size" ]] || ! [[ "$total_size" =~ ^[0-9]+$ ]] || (( total_size <= 0 )); then
+            total_size=0
+        fi
+
+        if (( total_size > 0 )); then
+            # ── progress-mode download ──
+            local human_total
+            human_total=$(bytes_human "$total_size")
+
+            # Start download silently in background
+            curl -fsSL --connect-timeout 5 --max-time 60 "$url" -o "$dest" &>/dev/null &
+            local curl_pid=$!
+
+            # Poll destination file size; render single-line progress
+            local cur=0 pct=0 human_cur=""
+            while kill -0 "$curl_pid" 2>/dev/null; do
+                cur=$(file_size "$dest" 2>/dev/null || echo 0)
+                pct=$(( cur * 100 / total_size ))
+                [[ $pct -gt 100 ]] && pct=100
+                human_cur=$(bytes_human "$cur")
+                printf "\r  [%d/%d] %-20s ... %d%% %s/%s" \
+                    "$i" "$total" "$label" "$pct" "$human_cur" "$human_total"
+                sleep 0.3
+            done
+
+            # Collect exit code
+            local curl_rc=0
+            wait "$curl_pid" || curl_rc=$?
+
+            if [[ $curl_rc -eq 0 ]]; then
+                local final_sz
+                final_sz=$(file_size "$dest" 2>/dev/null || echo 0)
+                human_cur=$(bytes_human "$final_sz")
+                printf "\r  [%d/%d] %-20s ... ${G}✅ %s${NC}\n" \
+                    "$i" "$total" "$label" "$human_cur"
+                chmod +x "$dest"
+                return 0
+            else
+                rm -f "$dest"
+                printf "\r  [%d/%d] %-20s ... ${Y}超时${NC}\n" \
+                    "$i" "$total" "$label"
+            fi
         else
-            echo -e "${Y}超时${NC}"
+            # ── fallback: no Content-Length available ──
+            printf "  [%d/%d] %-20s ... " "$i" "$total" "$label"
+            if curl -fsSL --connect-timeout 5 --max-time 60 "$url" -o "$dest" 2>/dev/null; then
+                local final_sz
+                final_sz=$(file_size "$dest" 2>/dev/null || echo 0)
+                local human_size
+                human_size=$(bytes_human "$final_sz")
+                echo -e "${G}✅ ${human_size}${NC}"
+                chmod +x "$dest"
+                return 0
+            else
+                rm -f "$dest"
+                echo -e "${Y}超时${NC}"
+            fi
         fi
     done
 
