@@ -430,7 +430,6 @@ verify_tunnel() {
 
     for ((sec=1; sec<=15; sec++)); do
         sleep 1
-        printf "\r  ... %2ds / 15s" "$sec"
 
         # Scan logs for auth/tunnel markers (only latest wins)
         local logs=""
