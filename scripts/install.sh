@@ -205,9 +205,7 @@ download_binary() {
         label="${label%)}"
         echo "  [${i}/${total}] ${label} ..."
         if curl -fSL# --connect-timeout 5 --max-time 60 "$url" -o "$dest"; then
-            local sz
-            sz=$(du -h "$dest" | cut -f1)
-            echo -e "        ${G}✅ ${sz}${NC}"
+            echo -e "        ${G}✅ $(du -h "$dest" | cut -f1)${NC}"
             chmod +x "$dest"
             return 0
         else
