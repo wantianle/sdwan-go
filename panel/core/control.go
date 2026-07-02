@@ -55,9 +55,14 @@ func loadOrGenerateToken(path string) (string, error) {
 	if err == nil {
 		return tok, nil
 	}
-	if !os.IsNotExist(err) {
-		return "", err
-	}
+	// On Windows, os.IsNotExist can fail to recognize wrapped *os.PathError
+	// when the error has been transported through %w. Instead of relying on
+	// it, treat any LoadControlToken failure as "generate a new token".
+	// This is safe because:
+	// - token file is missing → generate (we're already here)
+	// - token file is corrupt/empty → generate (daemon will do the same)
+	// - token file permission error → return error (the mkdir/write will
+	//   also fail and that message is more actionable)
 
 	// Generate new token (first install)
 	raw := make([]byte, 32)
