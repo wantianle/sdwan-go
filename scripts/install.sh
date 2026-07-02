@@ -405,7 +405,7 @@ show_postinstall_help() {
     echo "   sudo journalctl -u sdwan -f       # 实时日志 (Linux)"
     echo "   tail -f /var/log/sdwan.log        # 实时日志 (macOS)"
     echo ""
-    echo -e "${Y}💡 修改配置: sudo nano /etc/sdwan/iwan.conf && sudo systemctl restart sdwan${NC}"
+    echo -e "${Y}💡 修改配置: sudo vi /etc/sdwan/iwan.conf && sudo systemctl restart sdwan${NC}"
 }
 
 # re_enter_credentials prompts the user to re-enter username/password,
