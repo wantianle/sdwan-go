@@ -428,13 +428,19 @@ verify_tunnel() {
     local auth_rejected=0
     local established=0
 
+    # Record timestamp to prevent stale log entries from previous runs
+    local since_ts
+    if [[ "$OS" == "linux" ]]; then
+        since_ts=$(date +'%Y-%m-%d %H:%M:%S' -d '5 seconds ago' 2>/dev/null || date +'%Y-%m-%d %H:%M:%S')
+    fi
+
     for ((sec=1; sec<=15; sec++)); do
         sleep 1
 
         # Scan logs for auth/tunnel markers (only latest wins)
         local logs=""
         if [[ "$OS" == "linux" ]]; then
-            logs=$(journalctl -u sdwan -n 60 --no-pager 2>/dev/null || true)
+            logs=$(journalctl -u sdwan --since "$since_ts" --no-pager 2>/dev/null || true)
         else
             logs=$(tail -n 60 /var/log/sdwan.log 2>/dev/null || true)
         fi
@@ -617,14 +623,17 @@ main() {
     esac
 
     # Verify tunnel; if AUTH REJECTED, offer credential re-entry.
+    set +e
     verify_tunnel
     local vresult=$?
     while [[ $vresult -eq 1 ]]; do
+        echo ""
         echo -e "${Y}AUTH REJECTED - 请重新输入正确的账号密码${NC}"
         re_enter_credentials
         verify_tunnel
         vresult=$?
     done
+    set -e
 
     if [[ $vresult -eq 0 ]]; then
         show_postinstall_help
