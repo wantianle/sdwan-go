@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	controlapi "sdwan-go/pkg/controlapi"
 )
 
 // loadOrGenerateToken reads a bearer token from the file at tokenPath.
@@ -92,21 +94,6 @@ type switchRequest struct {
 	Server string `json:"server"`
 }
 
-// SwitchResponse is the JSON body returned on a successful switch.
-type SwitchResponse struct {
-	Status *StatusResult  `json:"status"`
-	Tunnel *OPENACKResult `json:"tunnel,omitempty"`
-}
-
-type pauseRequest struct {
-	Pause bool `json:"pause"`
-}
-
-type PauseResponse struct {
-	Status *StatusResult `json:"status"`
-	Paused bool          `json:"paused"`
-}
-
 // newControlMux builds the /v1/* handler tree backed by the given Client and
 // switch function. Tests call this directly with a mock switch; production
 // passes c.SwitchServer.
@@ -156,9 +143,12 @@ func newControlMux(c *Client, switchFn switchServerFunc, shutdownCh chan<- struc
 			return
 		}
 
-		resp := SwitchResponse{
+		resp := controlapi.SwitchResponse{
 			Status: c.Status(),
-			Tunnel: tun,
+			Tunnel: &controlapi.TunnelInfo{
+				LocalIP:   tun.LocalIP,
+				GatewayIP: tun.GatewayIP,
+			},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
@@ -169,14 +159,14 @@ func newControlMux(c *Client, switchFn switchServerFunc, shutdownCh chan<- struc
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		var req pauseRequest
+		var req controlapi.PauseRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
 		c.SetPaused(req.Pause)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(PauseResponse{Status: c.Status(), Paused: c.Paused()})
+		json.NewEncoder(w).Encode(controlapi.PauseResponse{Status: c.Status(), Paused: c.Paused()})
 	})
 
 	mux.HandleFunc("/v1/shutdown", func(w http.ResponseWriter, r *http.Request) {

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	controlapi "sdwan-go/pkg/controlapi"
 )
 
 // TunDevice abstracts a TUN virtual network device.
@@ -306,26 +308,12 @@ func (c *Client) validateSwitchSourceBind(s *Session, tunCfg *OPENACKResult) err
 	return nil
 }
 
-// StatusResult is a read-only snapshot of the current tunnel state for the
-// control API. All fields are thread-safe snapshots.
-type StatusResult struct {
-	State     string `json:"state"` // "running" or "disconnected"
-	Server    string `json:"server"`
-	Port      int    `json:"port"`
-	SessionID uint16 `json:"session_id"`
-	TUN       string `json:"tun"`
-	LocalIP   string `json:"local_ip"`
-	GatewayIP string `json:"gateway_ip"`
-	Route     string `json:"route"`
-	MTU       int    `json:"mtu"`
-}
-
 // Status returns a thread-safe snapshot of the current tunnel state.
-func (c *Client) Status() *StatusResult {
+func (c *Client) Status() *controlapi.StatusResult {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	sr := &StatusResult{State: "disconnected"}
+	sr := &controlapi.StatusResult{State: "disconnected"}
 
 	if c.session != nil && c.session.id != 0 {
 		sr.State = "running"
@@ -442,7 +430,12 @@ func (s *Session) Handshake(cfg *Config) ([]byte, error) {
 	}
 
 	// Send OPEN
-	openPkt := BuildOpenPacket(cfg)
+	openPkt := BuildOpenPacket(OpenConfig{
+		Username: cfg.Username,
+		Password: cfg.Password,
+		MTU:      cfg.MTU,
+		Encrypt:  cfg.Encrypt,
+	})
 	log.Println("[AUTH] Sending OPEN...")
 	if _, err := s.conn.Write(openPkt); err != nil {
 		return nil, fmt.Errorf("send OPEN: %w", err)

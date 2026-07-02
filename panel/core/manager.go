@@ -4,9 +4,6 @@ package core
 
 import (
 	"bufio"
-	"crypto/aes"
-	"crypto/md5"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -20,6 +17,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	protocol "sdwan-go/pkg/protocol"
 )
 
 // ServerInfo represents a selectable SD-WAN server node.
@@ -858,34 +857,21 @@ func smoothLatency(previous, sample int64) int64 {
 	return (previous*7 + sample*3 + 5) / 10
 }
 
-// NOTE: The probe protocol functions below (probeConfig, probeMsgOPENACK,
-// probeMsgOPEN, probeLatency, loadProbeConfig, probePktSign,
-// probePktSignInPlace, probePktVerify, probeEncryptPassword,
-// buildProbeOpenPacket, probeMsgType) are duplicates of
-// internal/core/protocol.go and must be kept in sync with any changes there.
-// They are actively used by the latency probe (probeOnce) and cannot be
-// removed / replaced with direct imports due to the Windows-only build
-// constraint of this package.
+// NOTE: The probe protocol functions below (probeConfig, probeLatency,
+// loadProbeConfig) use the shared protocol package for packet construction
+// and verification instead of duplicating logic.
 
 type probeConfig struct {
-	Server   string
-	Username string
-	Password string
-	Port     int
-	MTU      int
-	Encrypt  int
+	Server string
+	Port   int
+	Cfg    protocol.OpenConfig
 }
-
-const (
-	probeMsgOPENACK byte = 0x12
-	probeMsgOPEN    byte = 0x13
-)
 
 // probeLatency sends the SD-WAN OPEN handshake over UDP:10010 and measures
 // the time until a valid OPENACK arrives.
 func probeLatency(server string) int64 {
 	cfg := loadProbeConfig(server)
-	if cfg.Username == "" || cfg.Password == "" {
+	if cfg.Cfg.Username == "" || cfg.Cfg.Password == "" {
 		log.Printf("[LATENCY] %s probe skipped: missing username/password in iwan.conf", server)
 		return -1
 	}
@@ -903,7 +889,7 @@ func probeLatency(server string) int64 {
 	}
 	defer conn.Close()
 
-	openPkt := buildProbeOpenPacket(cfg)
+	openPkt := protocol.BuildOpenPacket(cfg.Cfg)
 	buf := make([]byte, 2048)
 	start := time.Now()
 	if _, err := conn.Write(openPkt); err != nil {
@@ -922,10 +908,10 @@ func probeLatency(server string) int64 {
 		if len(data) < 24 {
 			continue
 		}
-		if probeMsgType(data) != probeMsgOPENACK {
+		if protocol.MsgType(data) != protocol.MsgOPENACK {
 			continue
 		}
-		if !probePktVerify(data) {
+		if !protocol.PktVerify(data) {
 			continue
 		}
 		ms := time.Since(start).Milliseconds()
@@ -936,10 +922,12 @@ func probeLatency(server string) int64 {
 
 func loadProbeConfig(server string) probeConfig {
 	cfg := probeConfig{
-		Server:  server,
-		Port:    10010,
-		MTU:     1436,
-		Encrypt: 0,
+		Server: server,
+		Port:   10010,
+		Cfg: protocol.OpenConfig{
+			MTU:     1436,
+			Encrypt: 0,
+		},
 	}
 
 	f, err := os.Open(instance.iwanPath)
@@ -966,105 +954,24 @@ func loadProbeConfig(server string) probeConfig {
 				cfg.Server = val
 			}
 		case "username":
-			cfg.Username = val
+			cfg.Cfg.Username = val
 		case "password":
-			cfg.Password = val
+			cfg.Cfg.Password = val
 		case "port":
 			if v, err := strconv.Atoi(val); err == nil && v > 0 {
 				cfg.Port = v
 			}
 		case "mtu":
 			if v, err := strconv.Atoi(val); err == nil && v > 0 {
-				cfg.MTU = v
+				cfg.Cfg.MTU = v
 			}
 		case "encrypt":
 			if v, err := strconv.Atoi(val); err == nil {
-				cfg.Encrypt = v
+				cfg.Cfg.Encrypt = v
 			}
 		}
 	}
 	return cfg
-}
-
-func probePktSign(header []byte) []byte {
-	h := md5.New()
-	_, _ = h.Write(header[:8])
-	_, _ = h.Write([]byte("mw"))
-	return h.Sum(nil)
-}
-
-func probePktSignInPlace(header []byte) {
-	copy(header[8:24], probePktSign(header))
-}
-
-func probePktVerify(header []byte) bool {
-	expected := probePktSign(header)
-	for i := 0; i < 16; i++ {
-		if header[8+i] != expected[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func probeEncryptPassword(username, password string) []byte {
-	h := md5.New()
-	_, _ = h.Write([]byte("mw"))
-	_, _ = h.Write([]byte(username))
-	aesKey := h.Sum(nil)
-
-	block := make([]byte, 16)
-	copy(block, password)
-	cipher, err := aes.NewCipher(aesKey)
-	if err != nil {
-		return block
-	}
-	cipher.Encrypt(block, block)
-	return block
-}
-
-func buildProbeOpenPacket(cfg probeConfig) []byte {
-	buf := make([]byte, 1024)
-	pos := 0
-
-	buf[pos] = probeMsgOPEN
-	buf[pos+1] = byte(cfg.Encrypt)
-	pos += 8
-	pos += 16
-
-	buf[pos] = 0x03
-	buf[pos+1] = 0x04
-	binary.BigEndian.PutUint16(buf[pos+2:pos+4], uint16(cfg.MTU))
-	pos += 4
-
-	buf[pos] = 0x01
-	buf[pos+1] = byte(len(cfg.Username) + 2)
-	copy(buf[pos+2:], cfg.Username)
-	pos += 2 + len(cfg.Username)
-
-	encPW := probeEncryptPassword(cfg.Username, cfg.Password)
-	buf[pos] = 0x02
-	buf[pos+1] = 0x12
-	copy(buf[pos+2:], encPW)
-	pos += 18
-
-	if cfg.Encrypt != 0 {
-		buf[pos] = 0x08
-		buf[pos+1] = 0x03
-		buf[pos+2] = byte(cfg.Encrypt)
-		pos += 3
-	}
-
-	pkt := buf[:pos]
-	probePktSignInPlace(pkt[:24])
-	return pkt
-}
-
-func probeMsgType(data []byte) byte {
-	if len(data) == 0 {
-		return 0
-	}
-	return data[0]
 }
 
 // --- helpers ---------------------------------------------------------

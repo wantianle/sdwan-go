@@ -338,11 +338,11 @@ func TestEncryptPasswordEmptyUsername(t *testing.T) {
 func TestBuildOpenPacket(t *testing.T) {
 	tests := []struct {
 		name   string
-		config Config
+		config OpenConfig
 	}{
 		{
 			name: "default config without encrypt",
-			config: Config{
+			config: OpenConfig{
 				Username: "testuser",
 				Password: "testpass",
 				MTU:      1436,
@@ -351,7 +351,7 @@ func TestBuildOpenPacket(t *testing.T) {
 		},
 		{
 			name: "config with encrypt flag set",
-			config: Config{
+			config: OpenConfig{
 				Username: "admin",
 				Password: "secret",
 				MTU:      1500,
@@ -360,7 +360,7 @@ func TestBuildOpenPacket(t *testing.T) {
 		},
 		{
 			name: "config with max MTU",
-			config: Config{
+			config: OpenConfig{
 				Username: "u",
 				Password: "p",
 				MTU:      65535,
@@ -371,7 +371,7 @@ func TestBuildOpenPacket(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pkt := BuildOpenPacket(&tt.config)
+			pkt := BuildOpenPacket(tt.config)
 
 			// Minimum size: header(24) + TLV1(4) + TLV2(2+len(username)) + TLV3(2+16)
 			// + optional encrypt TLV(3)
@@ -458,7 +458,7 @@ func TestBuildOpenPacket(t *testing.T) {
 }
 
 func TestBuildOpenPacketSignatureIntegrity(t *testing.T) {
-	cfg := &Config{
+	cfg := OpenConfig{
 		Username: "signeduser",
 		Password: "signedpass",
 		MTU:      1436,

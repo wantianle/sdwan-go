@@ -1,90 +1,16 @@
 package core
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	controlapi "sdwan-go/pkg/controlapi"
 )
-
-// --- control API types (mirror core StatusResult / SwitchResponse) ---
-
-type controlStatusResult struct {
-	State     string `json:"state"`
-	Server    string `json:"server"`
-	Port      int    `json:"port"`
-	SessionID uint16 `json:"session_id"`
-	TUN       string `json:"tun"`
-	LocalIP   string `json:"local_ip"`
-	GatewayIP string `json:"gateway_ip"`
-	Route     string `json:"route"`
-	MTU       int    `json:"mtu"`
-}
-
-type controlSwitchResponse struct {
-	Status *controlStatusResult `json:"status"`
-	Tunnel *controlOpenAck      `json:"tunnel,omitempty"`
-}
-
-type controlOpenAck struct {
-	LocalIP   string `json:"local_ip"`
-	GatewayIP string `json:"gateway_ip"`
-}
-
-type controlError struct {
-	Error string `json:"error"`
-}
-
-// --- token helpers ---
-
-// loadControlToken reads the bearer token from the file at path.
-// Returns an error if the file is missing or empty.
-func loadControlToken(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	token := strings.TrimSpace(string(data))
-	if token == "" {
-		return "", fmt.Errorf("empty token file")
-	}
-	return token, nil
-}
-
-// loadOrGenerateToken reads the token file if it exists; otherwise it
-// generates a 32-byte random token, base64url encodes it, writes it with
-// mode 0600 (creating parent directories), and returns it.
-// Matches the core daemon's token generation so panel and daemon share one token.
-func loadOrGenerateToken(path string) (string, error) {
-	tok, err := loadControlToken(path)
-	if err == nil {
-		return tok, nil
-	}
-	if !os.IsNotExist(err) {
-		return "", err
-	}
-
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("generate token: %w", err)
-	}
-	token := base64.RawURLEncoding.EncodeToString(raw)
-
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return "", fmt.Errorf("create token dir: %w", err)
-	}
-	if err := os.WriteFile(path, []byte(token+"\n"), 0600); err != nil {
-		return "", fmt.Errorf("write token: %w", err)
-	}
-	return token, nil
-}
 
 // isAuthError returns true if err represents a 401 Unauthorized response
 // from the control API (wrong/mismatched token).
@@ -103,74 +29,48 @@ const (
 	controlTimeoutAction = 15 * time.Second
 )
 
-func getControlStatus(addr, token string) (*controlStatusResult, error) {
-	url := "http://" + addr + "/v1/status"
-	body, err := controlRequest(http.MethodGet, url, token, nil, controlTimeoutStatus)
-	if err != nil {
-		return nil, err
-	}
-	var sr controlStatusResult
-	if err := json.Unmarshal(body, &sr); err != nil {
-		return nil, fmt.Errorf("parse status: %w", err)
-	}
-	return &sr, nil
+func getControlStatus(addr, token string) (*controlapi.StatusResult, error) {
+	return controlapi.ControlStatusWithTimeout(addr, token, controlTimeoutStatus)
 }
 
-func postControlSwitch(addr, token, server string) (*controlSwitchResponse, error) {
-	url := "http://" + addr + "/v1/switch"
-	reqBody, _ := json.Marshal(map[string]string{"server": server})
-	body, err := controlRequest(http.MethodPost, url, token, bytes.NewReader(reqBody), controlTimeoutAction)
-	if err != nil {
-		return nil, err
-	}
-	var resp controlSwitchResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("parse switch response: %w", err)
-	}
-	return &resp, nil
+func postControlSwitch(addr, token, server string) (*controlapi.SwitchResponse, error) {
+	return controlapi.ControlSwitchWithTimeout(addr, token, server, controlTimeoutAction)
 }
 
 func postControlPause(addr, token string, pause bool) error {
-	url := "http://" + addr + "/v1/pause"
-	reqBody, _ := json.Marshal(map[string]bool{"pause": pause})
-	_, err := controlRequest(http.MethodPost, url, token, bytes.NewReader(reqBody), controlTimeoutAction)
-	return err
+	return controlapi.ControlPauseWithTimeout(addr, token, pause, controlTimeoutAction)
 }
 
 // postControlShutdown sends a graceful shutdown request to the daemon.
 func postControlShutdown(addr, token string) error {
-	url := "http://" + addr + "/v1/shutdown"
-	_, err := controlRequest(http.MethodPost, url, token, nil, controlTimeoutAction)
-	return err
+	return controlapi.ControlShutdownWithTimeout(addr, token, controlTimeoutAction)
 }
 
-func controlRequest(method, url, token string, body io.Reader, timeout time.Duration) ([]byte, error) {
-	client := &http.Client{Timeout: timeout}
-	req, err := http.NewRequest(method, url, body)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+// loadOrGenerateToken reads the token file if it exists; otherwise it
+// generates a 32-byte random token, base64url encodes it, writes it with
+// mode 0600 (creating parent directories), and returns it.
+// Matches the core daemon's token generation so panel and daemon share one token.
+func loadOrGenerateToken(path string) (string, error) {
+	tok, err := controlapi.LoadControlToken(path)
+	if err == nil {
+		return tok, nil
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if !os.IsNotExist(err) {
+		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request: %w", err)
+	// Generate new token (first install)
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate token: %w", err)
 	}
-	defer resp.Body.Close()
+	token := base64.RawURLEncoding.EncodeToString(raw)
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "", fmt.Errorf("create token dir: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		var ce controlError
-		if json.Unmarshal(data, &ce) == nil && ce.Error != "" {
-			return nil, fmt.Errorf("control API %d: %s", resp.StatusCode, ce.Error)
-		}
-		return nil, fmt.Errorf("control API %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	if err := os.WriteFile(path, []byte(token+"\n"), 0600); err != nil {
+		return "", fmt.Errorf("write token: %w", err)
 	}
-	return data, nil
+	return token, nil
 }

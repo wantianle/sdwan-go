@@ -96,7 +96,7 @@ func TestControlClientSwitch(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(SwitchResponse{
 			Status: &StatusResult{State: "running", SessionID: 99, TUN: "iwan1"},
-			Tunnel: &OPENACKResult{LocalIP: "10.0.0.2", GatewayIP: "10.0.0.1"},
+			Tunnel: &TunnelInfo{LocalIP: "10.0.0.2", GatewayIP: "10.0.0.1"},
 		})
 	}))
 	defer ts.Close()
