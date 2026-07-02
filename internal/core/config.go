@@ -121,8 +121,8 @@ func (c *Config) Validate() error {
 	if c.Password == "" {
 		return fmt.Errorf("INVALID password")
 	}
-	if c.MTU < 1200 || c.MTU > 1500 {
-		return fmt.Errorf("INVALID MTU: %d (must be 1200-1500)", c.MTU)
+	if c.MTU <= 0 {
+		return fmt.Errorf("INVALID MTU")
 	}
 	if c.Port <= 0 {
 		return fmt.Errorf("INVALID port")

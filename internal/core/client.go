@@ -952,14 +952,8 @@ func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
 		return nil, fmt.Errorf("switch: tunnel reconfig: %w", err)
 	}
 
-	// Effective MTU = min(configured, server advertised); never raise a
-	// configured MTU that is lower than what the server proposes.
-	// Preserve legacy (<=0) forward-compat: still use the server value.
 	if tunCfg.MTU > 0 {
-		serverMTU := int(tunCfg.MTU)
-		if nextCfg.MTU <= 0 || serverMTU < nextCfg.MTU {
-			nextCfg.MTU = serverMTU
-		}
+		nextCfg.MTU = int(tunCfg.MTU)
 	}
 
 	// e+f) atomically swap session + config

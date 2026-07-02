@@ -57,17 +57,10 @@ func RunOnce(configPath string) error {
 	log.Printf("[TUN] Local IP=%s Gateway=%s DNS=%s MTU=%d",
 		tunCfg.LocalIP, tunCfg.GatewayIP, tunCfg.DNSIP, tunCfg.MTU)
 
-	// Store baseline TUN config so SwitchServer can validate compatibility.
+	// 4. Apply server-assigned tunnel configuration
 	client.SetTunnelConfig(tunCfg)
-
-	// Effective MTU = min(configured, server advertised); never raise a
-	// configured MTU that is lower than what the server proposes.
-	// Preserve legacy (<=0) forward-compat: still use the server value.
 	if tunCfg.MTU > 0 {
-		serverMTU := int(tunCfg.MTU)
-		if cfg.MTU <= 0 || serverMTU < cfg.MTU {
-			cfg.MTU = serverMTU
-		}
+		cfg.MTU = int(tunCfg.MTU)
 	}
 
 	// 5. Create TUN, assign IP, add route (with retry + cleanup wiring)
@@ -171,10 +164,7 @@ func tryStartup(client *Client, cfg *Config) {
 
 		client.SetTunnelConfig(tunCfg)
 		if tunCfg.MTU > 0 {
-			serverMTU := int(tunCfg.MTU)
-			if cfg.MTU <= 0 || serverMTU < cfg.MTU {
-				cfg.MTU = serverMTU
-			}
+			cfg.MTU = int(tunCfg.MTU)
 		}
 
 		// 4. Setup TUN
