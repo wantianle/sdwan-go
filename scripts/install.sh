@@ -199,10 +199,10 @@ bytes_human() {
 }
 
 clear_download_line() {
-    # Clear enough columns for the progress line before printing the final
-    # status. This avoids leftovers when the final line is shorter than the
-    # last `\r` progress frame.
-    printf "\r%120s\r" ""
+    # Return to the beginning of the current line and clear to end-of-line.
+    # This avoids leftovers whenever a refreshed progress frame is shorter
+    # than the previous one.
+    printf "\r\033[K"
 }
 
 # ────────────────────────────────────────────────────────────
@@ -258,7 +258,8 @@ download_binary() {
                 pct=$(( cur * 100 / total_size ))
                 [[ $pct -gt 100 ]] && pct=100
                 human_cur=$(bytes_human "$cur")
-                printf "\r  [%d/%d] %-20s ... %d%% %s/%s" \
+                clear_download_line
+                printf "  [%d/%d] %-20s ... %d%% %s/%s" \
                     "$i" "$total" "$label" "$pct" "$human_cur" "$human_total"
                 sleep 0.3
             done
