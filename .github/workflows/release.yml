@@ -108,6 +108,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -120,8 +122,25 @@ jobs:
       - name: List artifacts
         run: ls -lh dist/
 
+      - name: Generate release notes
+        run: |
+          # Fetch all tags so we can compute the previous tag
+          git fetch --tags
+          PREV_TAG=$(git tag --sort=-creatordate | grep -v "${{ github.ref_name }}" | head -1)
+          echo "Previous tag: $PREV_TAG"
+          echo "# ${{ github.ref_name }}" > /tmp/release_body.md
+          echo "" >> /tmp/release_body.md
+          if [ -n "$PREV_TAG" ]; then
+            echo "**Changes since $PREV_TAG:**" >> /tmp/release_body.md
+            echo "" >> /tmp/release_body.md
+            git log --pretty=format:"- %s" $PREV_TAG..HEAD >> /tmp/release_body.md
+          else
+            echo "Initial release." >> /tmp/release_body.md
+          fi
+          cat /tmp/release_body.md
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: /tmp/release_body.md
