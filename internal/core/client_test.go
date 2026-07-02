@@ -2,6 +2,8 @@ package core
 
 import (
 	"testing"
+
+	protocol "sdwan-go/pkg/protocol"
 )
 
 func TestCloneConfig(t *testing.T) {
@@ -40,18 +42,15 @@ func TestCloneConfigNil(t *testing.T) {
 
 func TestCheckTunnelCompatibleOk(t *testing.T) {
 	cfg := &Config{MTU: 1436, Encrypt: 0}
-	c, err := NewClient(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.SetTunnelConfig(&OPENACKResult{
+	c := NewClient(cfg)
+	c.SetTunnelConfig(&protocol.OPENACKResult{
 		LocalIP:   "10.0.0.2",
 		GatewayIP: "10.0.0.1",
 		MTU:       1436,
 	})
 
 	// Same IPs, same MTU → OK
-	err = c.checkTunnelCompatible(&OPENACKResult{
+	err := c.checkTunnelCompatible(&protocol.OPENACKResult{
 		LocalIP:   "10.0.0.2",
 		GatewayIP: "10.0.0.1",
 		MTU:       1436,
@@ -63,13 +62,13 @@ func TestCheckTunnelCompatibleOk(t *testing.T) {
 
 func TestCheckTunnelCompatibleAllowsDifferentLocalIP(t *testing.T) {
 	cfg := &Config{MTU: 1436, Encrypt: 0}
-	c, _ := NewClient(cfg)
-	c.SetTunnelConfig(&OPENACKResult{
+	c := NewClient(cfg)
+	c.SetTunnelConfig(&protocol.OPENACKResult{
 		LocalIP:   "10.0.0.2",
 		GatewayIP: "10.0.0.1",
 	})
 
-	err := c.checkTunnelCompatible(&OPENACKResult{
+	err := c.checkTunnelCompatible(&protocol.OPENACKResult{
 		LocalIP:   "10.0.0.99",
 		GatewayIP: "10.0.0.1",
 	})
@@ -80,13 +79,13 @@ func TestCheckTunnelCompatibleAllowsDifferentLocalIP(t *testing.T) {
 
 func TestCheckTunnelCompatibleAllowsDifferentGateway(t *testing.T) {
 	cfg := &Config{MTU: 1436, Encrypt: 0}
-	c, _ := NewClient(cfg)
-	c.SetTunnelConfig(&OPENACKResult{
+	c := NewClient(cfg)
+	c.SetTunnelConfig(&protocol.OPENACKResult{
 		LocalIP:   "10.0.0.2",
 		GatewayIP: "10.0.0.1",
 	})
 
-	err := c.checkTunnelCompatible(&OPENACKResult{
+	err := c.checkTunnelCompatible(&protocol.OPENACKResult{
 		LocalIP:   "10.0.0.2",
 		GatewayIP: "10.0.0.254",
 	})
@@ -97,13 +96,13 @@ func TestCheckTunnelCompatibleAllowsDifferentGateway(t *testing.T) {
 
 func TestCheckTunnelCompatibleMTUMismatch(t *testing.T) {
 	cfg := &Config{MTU: 1436, Encrypt: 0}
-	c, _ := NewClient(cfg)
-	c.SetTunnelConfig(&OPENACKResult{
+	c := NewClient(cfg)
+	c.SetTunnelConfig(&protocol.OPENACKResult{
 		LocalIP:   "10.0.0.2",
 		GatewayIP: "10.0.0.1",
 	})
 
-	err := c.checkTunnelCompatible(&OPENACKResult{
+	err := c.checkTunnelCompatible(&protocol.OPENACKResult{
 		LocalIP:   "10.0.0.2",
 		GatewayIP: "10.0.0.1",
 		MTU:       1200, // different from config's 1436
@@ -115,10 +114,10 @@ func TestCheckTunnelCompatibleMTUMismatch(t *testing.T) {
 
 func TestCheckTunnelCompatibleNoBaseline(t *testing.T) {
 	cfg := &Config{MTU: 1436, Encrypt: 0}
-	c, _ := NewClient(cfg)
+	c := NewClient(cfg)
 	// No SetTunnelConfig call — baseline is nil.
 
-	err := c.checkTunnelCompatible(&OPENACKResult{
+	err := c.checkTunnelCompatible(&protocol.OPENACKResult{
 		LocalIP:   "10.0.0.2",
 		GatewayIP: "10.0.0.1",
 	})
@@ -145,10 +144,7 @@ func TestSessionCloseIdempotent(t *testing.T) {
 }
 
 func TestSwitchServerNilConfig(t *testing.T) {
-	c, err := NewClient(&Config{Server: "old", Username: "u", Password: "p", Port: 10010, MTU: 1436})
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := NewClient(&Config{Server: "old", Username: "u", Password: "p", Port: 10010, MTU: 1436})
 	if _, err := c.SwitchServer(nil); err == nil {
 		t.Fatal("expected error for nil config, got nil")
 	}
@@ -156,8 +152,7 @@ func TestSwitchServerNilConfig(t *testing.T) {
 
 func TestIsCurrentSession(t *testing.T) {
 	cfg := &Config{Server: "test", Username: "u", Password: "p", Port: 10010, MTU: 1436}
-	c, _ := NewClient(cfg)
-
+	c := NewClient(cfg)
 	// No session set yet — nothing is current.
 	if c.isCurrentSession(&Session{done: make(chan struct{})}) {
 		t.Error("no session set, isCurrentSession should be false")
@@ -182,7 +177,7 @@ func TestIsCurrentSession(t *testing.T) {
 
 func TestStartWithoutSession(t *testing.T) {
 	cfg := &Config{Server: "test", Username: "u", Password: "p", Port: 10010, MTU: 1436}
-	c, _ := NewClient(cfg)
+	c := NewClient(cfg)
 	err := c.Start()
 	if err == nil {
 		t.Fatal("expected error when calling Start without a session")

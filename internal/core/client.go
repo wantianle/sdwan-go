@@ -11,6 +11,7 @@ import (
 	"time"
 
 	controlapi "sdwan-go/pkg/controlapi"
+	protocol "sdwan-go/pkg/protocol"
 )
 
 // TunDevice abstracts a TUN virtual network device.
@@ -41,7 +42,7 @@ type Session struct {
 type Client struct {
 	mu               sync.RWMutex // protects session/config/tunConfig swaps
 	config           *Config
-	tunConfig        *OPENACKResult // baseline TUN config from initial handshake
+	tunConfig        *protocol.OPENACKResult // baseline TUN config from initial handshake
 	lastBindHint     *net.UDPAddr
 	TUN              TunDevice
 	session          *Session
@@ -62,12 +63,12 @@ type Client struct {
 }
 
 // NewClient creates a new SDWAN client
-func NewClient(cfg *Config) (*Client, error) {
+func NewClient(cfg *Config) *Client {
 	return &Client{
 		config:      cfg,
 		stopCh:      make(chan struct{}),
 		reconnectCh: make(chan struct{}, 1),
-	}, nil
+	}
 }
 
 // currentSession returns the active session pointer under the read lock.
@@ -108,14 +109,14 @@ func (c *Client) setSession(s *Session) (old *Session) {
 
 // SetTunnelConfig stores the baseline TUN configuration from the initial
 // handshake so SwitchServer can validate compatibility with new servers.
-func (c *Client) SetTunnelConfig(t *OPENACKResult) {
+func (c *Client) SetTunnelConfig(t *protocol.OPENACKResult) {
 	c.mu.Lock()
 	c.tunConfig = t
 	c.mu.Unlock()
 }
 
 // currentTunConfig returns a snapshot of the baseline tunnel config.
-func (c *Client) currentTunConfig() *OPENACKResult {
+func (c *Client) currentTunConfig() *protocol.OPENACKResult {
 	c.mu.RLock()
 	t := c.tunConfig
 	c.mu.RUnlock()
@@ -140,11 +141,11 @@ func cloneConfig(cfg *Config) *Config {
 	return &cpy
 }
 
-// checkTunnelCompatible returns an error if the new OPENACKResult requires an
+// checkTunnelCompatible returns an error if the new protocol.OPENACKResult requires an
 // unsupported reconfiguration. Server-assigned LocalIP/GatewayIP changes are
 // allowed and applied in-place by applyTunnelConfig; MTU changes are still
 // rejected for now because MTU reconfiguration is separate.
-func (c *Client) checkTunnelCompatible(newCfg *OPENACKResult) error {
+func (c *Client) checkTunnelCompatible(newCfg *protocol.OPENACKResult) error {
 	old := c.currentTunConfig()
 	if old == nil {
 		return fmt.Errorf("no baseline tunnel config: call SetTunnelConfig first")
@@ -161,7 +162,7 @@ func (c *Client) checkTunnelCompatible(newCfg *OPENACKResult) error {
 // applyTunnelConfig applies server-assigned tunnel IP changes to the existing
 // TUN adapter before publishing a new session. It never closes/recreates TUN
 // and does not touch routes; existing routes are interface-based.
-func (c *Client) applyTunnelConfig(tunCfg *OPENACKResult, cfg *Config) error {
+func (c *Client) applyTunnelConfig(tunCfg *protocol.OPENACKResult) error {
 	if tunCfg == nil {
 		return fmt.Errorf("nil tunnel config")
 	}
@@ -186,7 +187,6 @@ func (c *Client) applyTunnelConfig(tunCfg *OPENACKResult, cfg *Config) error {
 	c.mu.Lock()
 	c.tunConfig = tunCfg
 	c.mu.Unlock()
-	_ = cfg // kept for future MTU/address reconfiguration without changing signature
 	return nil
 }
 
@@ -297,7 +297,7 @@ func isLocalPhysicalIP(ip net.IP) bool {
 	return false
 }
 
-func (c *Client) validateSwitchSourceBind(s *Session, tunCfg *OPENACKResult) error {
+func (c *Client) validateSwitchSourceBind(s *Session, tunCfg *protocol.OPENACKResult) error {
 	if s == nil || s.conn == nil {
 		return nil
 	}
@@ -367,7 +367,7 @@ func (c *Client) Status() *controlapi.StatusResult {
 // newSession resolves and dials the UDP server from config, returning a
 // Session with the live connection but without performing a handshake.
 func newSession(cfg *Config, localAddr *net.UDPAddr) (*Session, error) {
-	addr, err := resolveUDPAddrWithRetry(cfg.Server, cfg.Port)
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", cfg.Server, cfg.Port))
 	if err != nil {
 		return nil, fmt.Errorf("resolve server: %w", err)
 	}
@@ -384,25 +384,6 @@ func newSession(cfg *Config, localAddr *net.UDPAddr) (*Session, error) {
 		pipeIdx: uint32(cfg.PipeIdx),
 		done:    make(chan struct{}),
 	}, nil
-}
-
-func resolveUDPAddrWithRetry(host string, port int) (*net.UDPAddr, error) {
-	var lastErr error
-	backoffs := []time.Duration{0, 500 * time.Millisecond, time.Second}
-	for i, backoff := range backoffs {
-		if backoff > 0 {
-			time.Sleep(backoff)
-		}
-		addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", host, port))
-		if err == nil {
-			return addr, nil
-		}
-		lastErr = err
-		if i < len(backoffs)-1 {
-			log.Printf("[DNS] Resolve %s:%d failed, retrying: %v", host, port, err)
-		}
-	}
-	return nil, lastErr
 }
 
 // Connect opens the UDP socket and initialises the Session.
@@ -451,7 +432,7 @@ func (s *Session) Handshake(cfg *Config) ([]byte, error) {
 	}
 
 	// Send OPEN
-	openPkt := BuildOpenPacket(OpenConfig{
+	openPkt := protocol.BuildOpenPacket(protocol.OpenConfig{
 		Username: cfg.Username,
 		Password: cfg.Password,
 		MTU:      cfg.MTU,
@@ -475,15 +456,15 @@ func (s *Session) Handshake(cfg *Config) ([]byte, error) {
 		if len(data) < 24 {
 			continue
 		}
-		mt := MsgType(data)
-		if mt == MsgOPENACK {
-			if !PktVerify(data) {
+		mt := protocol.MsgType(data)
+		if mt == protocol.MsgOPENACK {
+			if !protocol.PktVerify(data) {
 				log.Println("[AUTH] OPENACK signature mismatch, retrying...")
 				s.conn.Write(openPkt)
 				continue
 			}
-			s.id, _ = ParseSessionID(data)
-			s.seq = ParseOPENACKSeq(data)
+			s.id, _ = protocol.ParseSessionID(data)
+			s.seq = protocol.ParseOPENACKSeq(data)
 			s.conn.SetReadDeadline(time.Time{})
 			log.Printf("[AUTH] OPENACK received, session=%d seq=%d", s.id, s.seq)
 			return data, nil
@@ -571,13 +552,6 @@ func (c *Client) SetRouteConflicts(conflicts []RouteConflict) {
 	c.mu.Lock()
 	c.routeConflicts = conflicts
 	c.mu.Unlock()
-}
-
-func (c *Client) getRouteConflicts() []RouteConflict {
-	c.mu.RLock()
-	conf := c.routeConflicts
-	c.mu.RUnlock()
-	return conf
 }
 
 func (c *Client) startReconnect() {
@@ -693,12 +667,12 @@ func (c *Client) sessionToTUN(s *Session) error {
 			return err
 		}
 		data := buf[:n]
-		mt := MsgType(data)
+		mt := protocol.MsgType(data)
 
 		switch mt {
-		case MsgECHORESP:
+		case protocol.MsgECHORESP:
 			// heartbeat response, consume silently
-		case MsgTUNSetup, MsgDATA:
+		case protocol.MsgTUNSetup, protocol.MsgDATA:
 			// 0x14 = unencrypted DATA, 0x18 = encrypted DATA
 			// Both share 8-byte header, skip it for TUN write
 			if len(data) > 8 {
@@ -812,7 +786,7 @@ func (c *Client) heartbeatLoop(s *Session) {
 	sendBeat := func(s *Session) {
 		s.echoCnt++
 		ts := uint64(time.Now().UnixNano() / 1000)
-		pkt := BuildEchoReq(s.id, s.seq, ts, s.pipeID, s.pipeIdx, s.echoCnt)
+		pkt := protocol.BuildEchoReq(s.id, s.seq, ts, s.pipeID, s.pipeIdx, s.echoCnt)
 		if _, err := s.conn.Write(pkt); err != nil {
 			log.Printf("[ERROR] Send ECHOREQ: %v", err)
 			c.failSession(s, err)
@@ -854,9 +828,9 @@ func (c *Client) heartbeatLoop(s *Session) {
 func buildDataPacket(sessionID uint16, seq uint32, payload []byte, encrypt int) []byte {
 	hdr := make([]byte, 8)
 	if encrypt != 0 {
-		hdr[0] = MsgDATA // 0x18
+		hdr[0] = protocol.MsgDATA // 0x18
 	} else {
-		hdr[0] = MsgTUNSetup // 0x14
+		hdr[0] = protocol.MsgTUNSetup // 0x14
 	}
 	hdr[1] = byte(encrypt)
 	binary.BigEndian.PutUint16(hdr[2:4], sessionID)
@@ -896,7 +870,7 @@ func connectAndHandshakeSession(cfg *Config, localAddr *net.UDPAddr) (*Session, 
 // goroutines are started for the new session, and the parsed OPENACK is
 // returned. On failure the new session is closed and an error is returned;
 // the existing session is left untouched.
-func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
+func (c *Client) SwitchServer(next *Config) (*protocol.OPENACKResult, error) {
 	c.paused.Store(false)
 
 	if c.startupPending.Load() {
@@ -932,7 +906,7 @@ func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
 	}
 
 	// c) parse OPENACK
-	tunCfg := ParseOPENACK(raw)
+	tunCfg := protocol.ParseOPENACK(raw)
 	if tunCfg.LocalIP == "" || tunCfg.GatewayIP == "" {
 		newS.Close()
 		return nil, fmt.Errorf("switch: OPENACK missing IP info")
@@ -947,7 +921,7 @@ func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
 		newS.Close()
 		return nil, fmt.Errorf("switch: incompatible: %w", err)
 	}
-	if err := c.applyTunnelConfig(tunCfg, nextCfg); err != nil {
+	if err := c.applyTunnelConfig(tunCfg); err != nil {
 		newS.Close()
 		return nil, fmt.Errorf("switch: tunnel reconfig: %w", err)
 	}

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"sdwan-go/internal/core"
+	controlapi "sdwan-go/pkg/controlapi"
 )
 
 // Build metadata — injected via ldflags at build time
@@ -92,9 +93,9 @@ func main() {
 
 func resolveToken(configPath, tokenFile string) (string, error) {
 	if tokenFile != "" {
-		return core.LoadControlToken(tokenFile)
+		return controlapi.LoadControlToken(tokenFile)
 	}
-	return core.LoadControlToken(core.DefaultTokenPath(configPath))
+	return controlapi.LoadControlToken(core.DefaultTokenPath(configPath))
 }
 
 // ---------- status subcommand ----------
@@ -112,7 +113,7 @@ func runStatusCmd() {
 		log.Fatalf("[FATAL] token: %v", err)
 	}
 
-	sr, err := core.ControlStatus(*controlAddr, token)
+	sr, err := controlapi.ControlStatus(*controlAddr, token)
 	if err != nil {
 		log.Fatalf("[FATAL] status: %v", err)
 	}
@@ -165,7 +166,7 @@ func runSwitchCmd() {
 		log.Fatalf("[FATAL] token: %v", err)
 	}
 
-	resp, err := core.ControlSwitch(*controlAddr, token, server)
+	resp, err := controlapi.ControlSwitch(*controlAddr, token, server)
 	if err != nil {
 		log.Fatalf("[FATAL] switch: %v", err)
 	}

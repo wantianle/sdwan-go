@@ -3,6 +3,7 @@ package protocol
 import (
 	"crypto/aes"
 	"crypto/md5"
+	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 )
@@ -61,12 +62,7 @@ func PktVerify(header []byte) bool {
 	if expected == nil {
 		return false
 	}
-	for i := 0; i < 16; i++ {
-		if header[8+i] != expected[i] {
-			return false
-		}
-	}
-	return true
+	return subtle.ConstantTimeCompare(header[8:24], expected) == 1
 }
 
 // EncryptPassword computes the AES-128 encrypted password block.

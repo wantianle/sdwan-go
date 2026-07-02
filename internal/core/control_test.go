@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	controlapi "sdwan-go/pkg/controlapi"
+	protocol "sdwan-go/pkg/protocol"
 )
 
 func TestLoadTokenExisting(t *testing.T) {
@@ -118,7 +121,7 @@ func TestBearerAuthPasses(t *testing.T) {
 }
 
 func TestStatusEndpointReturnsJSON(t *testing.T) {
-	c, err := NewClient(&Config{
+	c := NewClient(&Config{
 		Server:   "test.example.com",
 		Username: "u",
 		Password: "p",
@@ -126,10 +129,7 @@ func TestStatusEndpointReturnsJSON(t *testing.T) {
 		MTU:      1436,
 		RouteNet: "192.168.0.0/16",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.SetTunnelConfig(&OPENACKResult{
+	c.SetTunnelConfig(&protocol.OPENACKResult{
 		LocalIP:   "10.0.0.2",
 		GatewayIP: "10.0.0.1",
 	})
@@ -159,7 +159,7 @@ func TestStatusEndpointReturnsJSON(t *testing.T) {
 		t.Fatalf("expected JSON content-type, got %q", ct)
 	}
 
-	var sr StatusResult
+	var sr controlapi.StatusResult
 	if err := json.Unmarshal(rec.Body.Bytes(), &sr); err != nil {
 		t.Fatalf("failed to parse JSON: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestStatusEndpointReturnsJSON(t *testing.T) {
 }
 
 func newTestClient() *Client {
-	c, _ := NewClient(&Config{
+	c := NewClient(&Config{
 		Server:   "current.example.com",
 		Username: "u",
 		Password: "p",
@@ -199,7 +199,7 @@ func newTestClient() *Client {
 		MTU:      1436,
 		RouteNet: "192.168.0.0/16",
 	})
-	c.SetTunnelConfig(&OPENACKResult{
+	c.SetTunnelConfig(&protocol.OPENACKResult{
 		LocalIP:   "10.0.0.2",
 		GatewayIP: "10.0.0.1",
 	})
@@ -289,9 +289,9 @@ func TestSwitchEndpointAuthRejected(t *testing.T) {
 func TestSwitchEndpointSuccess(t *testing.T) {
 	c := newTestClient()
 	var switchedTo string
-	fn := func(next *Config) (*OPENACKResult, error) {
+	fn := func(next *Config) (*protocol.OPENACKResult, error) {
 		switchedTo = next.Server
-		return &OPENACKResult{
+		return &protocol.OPENACKResult{
 			LocalIP:   "10.0.0.2",
 			GatewayIP: "10.0.0.1",
 		}, nil
@@ -311,7 +311,7 @@ func TestSwitchEndpointSuccess(t *testing.T) {
 		t.Fatalf("switch called with %q, expected new.example.com", switchedTo)
 	}
 
-	var resp SwitchResponse
+	var resp controlapi.SwitchResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -325,7 +325,7 @@ func TestSwitchEndpointSuccess(t *testing.T) {
 
 func TestSwitchEndpointError(t *testing.T) {
 	c := newTestClient()
-	fn := func(next *Config) (*OPENACKResult, error) {
+	fn := func(next *Config) (*protocol.OPENACKResult, error) {
 		return nil, fmt.Errorf("handshake \"timeout\"")
 	}
 	h := authMux(c, fn, "tok")
@@ -353,9 +353,9 @@ func TestSwitchEndpointServerOnly(t *testing.T) {
 	// does not propagate other config fields from the request body.
 	c := newTestClient()
 	var received *Config
-	fn := func(next *Config) (*OPENACKResult, error) {
+	fn := func(next *Config) (*protocol.OPENACKResult, error) {
 		received = next
-		return &OPENACKResult{LocalIP: "10.0.0.2", GatewayIP: "10.0.0.1"}, nil
+		return &protocol.OPENACKResult{LocalIP: "10.0.0.2", GatewayIP: "10.0.0.1"}, nil
 	}
 	h := authMux(c, fn, "tok")
 

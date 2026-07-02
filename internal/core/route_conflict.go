@@ -1,6 +1,9 @@
 package core
 
-import "net"
+import (
+	"net"
+	"net/netip"
+)
 
 // RouteConflict represents an overlap between a configured SDWAN route
 // and a local physical network interface subnet.
@@ -14,8 +17,8 @@ type RouteConflict struct {
 // with any active local network interface subnet (excluding loopback and
 // the TUN interface itself). Returns nil if no conflicts found.
 func detectRouteConflicts(routeNet, tunName string) []RouteConflict {
-	_, routeNetParsed, err := net.ParseCIDR(routeNet)
-	if err != nil || routeNetParsed == nil || routeNetParsed.IP.To4() == nil {
+	routePrefix, err := netip.ParsePrefix(routeNet)
+	if err != nil || !routePrefix.Addr().Is4() {
 		return nil
 	}
 
@@ -45,8 +48,16 @@ func detectRouteConflicts(routeNet, tunName string) []RouteConflict {
 				continue // skip IPv6 for now
 			}
 
+			ones, _ := ipnet.Mask.Size()
+			ip4 := ipnet.IP.To4()
+			if ip4 == nil {
+				continue
+			}
+			localAddr := netip.AddrFrom4([4]byte{ip4[0], ip4[1], ip4[2], ip4[3]})
+			localPrefix := netip.PrefixFrom(localAddr, ones)
+
 			// Check if local CIDR overlaps with SDWAN route
-			if cidrOverlap(ipnet, routeNetParsed) {
+			if routePrefix.Overlaps(localPrefix) {
 				conflicts = append(conflicts, RouteConflict{
 					Interface: iface.Name,
 					LocalCIDR: ipnet.String(),
@@ -57,28 +68,4 @@ func detectRouteConflicts(routeNet, tunName string) []RouteConflict {
 		}
 	}
 	return conflicts
-}
-
-// cidrOverlap returns true if two IPv4 CIDR networks overlap.
-func cidrOverlap(a, b *net.IPNet) bool {
-	aFirst, aLast := cidrRange(a)
-	bFirst, bLast := cidrRange(b)
-	// Overlap if a starts before b ends AND b starts before a ends
-	return !(aLast < bFirst || bLast < aFirst)
-}
-
-// cidrRange returns the first and last IP addresses of a CIDR as uint32.
-func cidrRange(n *net.IPNet) (first, last uint32) {
-	ip4 := n.IP.Mask(n.Mask).To4()
-	if ip4 == nil {
-		return 0, 0
-	}
-	first = uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3])
-	maskOnes, _ := n.Mask.Size()
-	if maskOnes == 32 {
-		return first, first
-	}
-	hostBits := 32 - maskOnes
-	last = first | ((1 << hostBits) - 1)
-	return
 }

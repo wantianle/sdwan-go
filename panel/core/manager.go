@@ -3,7 +3,6 @@
 package core
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -18,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	controlapi "sdwan-go/pkg/controlapi"
 	protocol "sdwan-go/pkg/protocol"
 )
 
@@ -59,7 +59,6 @@ type SdwanManager struct {
 	daemonPollStop  chan struct{}
 	daemonPollerOn  atomic.Bool
 	autoConnecting  atomic.Bool
-	manualChangeSeq atomic.Uint64
 	lastAutoAttempt atomic.Int64
 	mtuApplying     bool
 	onStateChange   func() // optional callback for UI refresh
@@ -89,7 +88,7 @@ func GetManager() *SdwanManager {
 			daemonPollStop: make(chan struct{}, 1),
 		}
 		// Generates token on first install so panel and daemon share one.
-		if tok, err := loadOrGenerateToken(m.tokenPath); err == nil {
+		if tok, err := controlapi.LoadControlToken(m.tokenPath); err == nil {
 			m.token = tok
 		} else {
 			log.Printf("[PANEL] Token init failed: %v", err)
@@ -185,7 +184,6 @@ func (m *SdwanManager) GetServers() []map[string]string {
 // reachable but the tunnel is disconnected, it reconnects via POST /v1/switch.
 // If the API is unreachable, it starts the daemon.
 func (m *SdwanManager) ToggleConnection() bool {
-	m.manualChangeSeq.Add(1)
 	m.mu.Lock()
 	token := m.token
 	controlAddr := m.controlAddr
@@ -202,7 +200,7 @@ func (m *SdwanManager) ToggleConnection() bool {
 		}
 
 		if state == "running" || state == "reconnecting" {
-			if err := postControlPause(controlAddr, token, true); err != nil {
+			if err := controlapi.ControlPauseWithTimeout(controlAddr, token, true, 10*time.Second); err != nil {
 				log.Printf("[PANEL] Pause failed: %v", err)
 				if m.onStateChange != nil {
 					m.onStateChange()
@@ -219,7 +217,7 @@ func (m *SdwanManager) ToggleConnection() bool {
 			return
 		}
 
-		sr, err := getControlStatus(controlAddr, token)
+		sr, err := controlapi.ControlStatusWithTimeout(controlAddr, token, 2*time.Second)
 		if err != nil {
 			if ok := m.ensureDaemonRunning(); ok && m.onStateChange != nil {
 				m.onStateChange()
@@ -244,7 +242,7 @@ func (m *SdwanManager) ToggleConnection() bool {
 		m.mu.Unlock()
 
 		log.Println("[PANEL] Triggering daemon reconnect")
-		if err := postControlPause(controlAddr, token, false); err != nil {
+		if err := controlapi.ControlPauseWithTimeout(controlAddr, token, false, 10*time.Second); err != nil {
 			log.Printf("[PANEL] Resume failed: %v", err)
 			m.mu.Lock()
 			m.state = "disconnected"
@@ -272,7 +270,6 @@ func (m *SdwanManager) ToggleConnection() bool {
 // Persistence (config.json + iwan.conf) only happens AFTER a successful
 // switch, so failed attempts preserve the previous selection.
 func (m *SdwanManager) SelectServer(id string) bool {
-	m.manualChangeSeq.Add(1)
 	m.mu.Lock()
 
 	found := false
@@ -295,7 +292,7 @@ func (m *SdwanManager) SelectServer(id string) bool {
 	m.mu.Unlock()
 
 	if token != "" {
-		sr, err := getControlStatus(controlAddr, token)
+		sr, err := controlapi.ControlStatusWithTimeout(controlAddr, token, 2*time.Second)
 		if err == nil {
 			m.startDaemonPoller()
 			m.mu.Lock()
@@ -312,7 +309,7 @@ func (m *SdwanManager) SelectServer(id string) bool {
 			}
 
 			log.Printf("[PANEL] Switching daemon to %s", targetName)
-			if _, err := postControlSwitch(controlAddr, token, targetName); err != nil {
+			if _, err := controlapi.ControlSwitchWithTimeout(controlAddr, token, targetName, 15*time.Second); err != nil {
 				log.Printf("[PANEL] Daemon switch failed: %v", err)
 				m.mu.Lock()
 				m.state = "disconnected"
@@ -377,7 +374,13 @@ func (m *SdwanManager) OptimizeMTU() map[string]interface{} {
 	}
 	m.mtuApplying = true
 	server := m.getCurrentServerName()
-	currentMTU, mtuErr := m.parseIwanMTU()
+	var currentMTU int
+	var mtuErr error
+	if cfg, err := parseIwanConf(m.iwanPath); err != nil {
+		mtuErr = err
+	} else {
+		currentMTU, mtuErr = strconv.Atoi(cfg["mtu"])
+	}
 	token := m.token
 	controlAddr := m.controlAddr
 	m.mu.Unlock()
@@ -410,7 +413,7 @@ func (m *SdwanManager) OptimizeMTU() map[string]interface{} {
 		}
 	}
 
-	if err := m.rewriteIwanMTU(detectedMTU); err != nil {
+	if err := updateIwanConfKey(m.iwanPath, "mtu", fmt.Sprintf("%d", detectedMTU)); err != nil {
 		return mtuResult(false, fmt.Sprintf("写入 MTU 失败：%v，未修改。", err))
 	}
 
@@ -424,7 +427,7 @@ func (m *SdwanManager) OptimizeMTU() map[string]interface{} {
 
 	if token != "" {
 		log.Println("[PANEL] Applying MTU: graceful daemon shutdown")
-		if err := postControlShutdown(controlAddr, token); err != nil {
+		if err := controlapi.ControlShutdownWithTimeout(controlAddr, token, 10*time.Second); err != nil {
 			log.Printf("[PANEL] MTU shutdown request failed: %v", err)
 		}
 	}
@@ -567,7 +570,7 @@ func (m *SdwanManager) Shutdown() {
 		log.Println("[PANEL] Sending shutdown to daemon...")
 		var err error
 		for i := 0; i < 5; i++ {
-			err = postControlShutdown(controlAddr, token)
+			err = controlapi.ControlShutdownWithTimeout(controlAddr, token, 10*time.Second)
 			if err == nil {
 				break
 			}
@@ -592,8 +595,51 @@ func (m *SdwanManager) Shutdown() {
 	log.Println("[PANEL] Shutdown — probes stopped, daemon shutting down")
 }
 
-func (m *SdwanManager) isManualSequenceChanged(seq uint64) bool {
-	return m.manualChangeSeq.Load() != seq
+// --- iwan.conf helpers -----------------------------------------------
+
+// parseIwanConf reads all key=value pairs from iwan.conf.
+func parseIwanConf(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		result[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+	}
+	return result, nil
+}
+
+// updateIwanConfKey reads iwan.conf, replaces the line matching ^key\s*=,
+// and writes it back.
+func updateIwanConfKey(path, key, value string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(data), "\n")
+	prefix := key + "="
+	found := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, prefix) || strings.HasPrefix(trimmed, key+" ") {
+			lines[i] = key + "=" + value
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("key %q not found in %s", key, path)
+	}
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
 }
 
 // --- iwan.conf sync -------------------------------------------------
@@ -604,34 +650,15 @@ func (m *SdwanManager) syncIwanConf() error {
 	serverName := m.getCurrentServerName()
 
 	// Skip if already correct — prevents watcher→reload→sync→watcher loop
-	if m.ParseIwanServer() == serverName {
-		return nil
-	}
-
-	// Read existing iwan.conf
-	data, err := os.ReadFile(m.iwanPath)
+	cfg, err := parseIwanConf(m.iwanPath)
 	if err != nil {
 		return m.writeDefaultIwanConf()
 	}
-
-	lines := strings.Split(string(data), "\n")
-	found := false
-	newLine := "server=" + serverName
-
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "server=") || strings.HasPrefix(trimmed, "server ") {
-			lines[i] = newLine
-			found = true
-			break
-		}
+	if cfg["server"] == serverName {
+		return nil
 	}
 
-	if !found {
-		lines = append(lines, newLine)
-	}
-
-	return os.WriteFile(m.iwanPath, []byte(strings.Join(lines, "\n")), 0644)
+	return updateIwanConfKey(m.iwanPath, "server", serverName)
 }
 
 func (m *SdwanManager) writeDefaultIwanConf() error {
@@ -754,7 +781,7 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 
 	// Quick check: is API already responding?
 	if token != "" {
-		sr, err := getControlStatus(controlAddr, token)
+		sr, err := controlapi.ControlStatusWithTimeout(controlAddr, token, 2*time.Second)
 		if err == nil {
 			if sr.State == "running" {
 				m.mu.Lock()
@@ -792,7 +819,7 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 	if alreadyStarted {
 		if token == "" {
 			var tokErr error
-			m.token, tokErr = loadOrGenerateToken(m.tokenPath)
+			m.token, tokErr = controlapi.LoadControlToken(m.tokenPath)
 			if tokErr != nil {
 				log.Printf("[DAEMON] Token load failed on already-started poll: %v", tokErr)
 				return false
@@ -814,7 +841,7 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 	// so both panel and daemon share the same token. Without this
 	// pollDaemonReady below gets an empty token and silently fails.
 	var tokErr error
-	m.token, tokErr = loadOrGenerateToken(m.tokenPath)
+	m.token, tokErr = controlapi.LoadControlToken(m.tokenPath)
 	if tokErr != nil {
 		log.Printf("[DAEMON] Token generation failed: %v", tokErr)
 		m.mu.Unlock()
@@ -855,7 +882,7 @@ func (m *SdwanManager) pollDaemonReady(token, controlAddr string) bool {
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(1 * time.Second)
-		if sr, err := getControlStatus(controlAddr, token); err == nil && sr.State == "running" {
+		if sr, err := controlapi.ControlStatusWithTimeout(controlAddr, token, 2*time.Second); err == nil && sr.State == "running" {
 			m.mu.Lock()
 			m.state = "running"
 			m.connected = true
@@ -906,7 +933,7 @@ func (m *SdwanManager) pollDaemonStatusOnce() {
 	if token == "" {
 		return
 	}
-	sr, err := getControlStatus(controlAddr, token)
+	sr, err := controlapi.ControlStatusWithTimeout(controlAddr, token, 2*time.Second)
 
 	m.mu.Lock()
 	if err == nil {
@@ -1095,127 +1122,39 @@ func loadProbeConfig(server string) probeConfig {
 		},
 	}
 
-	f, err := os.Open(instance.iwanPath)
+	parsed, err := parseIwanConf(instance.iwanPath)
 	if err != nil {
 		return cfg
 	}
-	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
-			continue
+	if v, ok := parsed["server"]; ok && cfg.Server == "" {
+		cfg.Server = v
+	}
+	if v, ok := parsed["username"]; ok {
+		cfg.Cfg.Username = v
+	}
+	if v, ok := parsed["password"]; ok {
+		cfg.Cfg.Password = v
+	}
+	if v, ok := parsed["port"]; ok {
+		if p, err := strconv.Atoi(v); err == nil && p > 0 {
+			cfg.Port = p
 		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
+	}
+	if v, ok := parsed["mtu"]; ok {
+		if m, err := strconv.Atoi(v); err == nil && m > 0 {
+			cfg.Cfg.MTU = m
 		}
-		key := strings.TrimSpace(parts[0])
-		val := strings.TrimSpace(parts[1])
-		switch key {
-		case "server":
-			if cfg.Server == "" {
-				cfg.Server = val
-			}
-		case "username":
-			cfg.Cfg.Username = val
-		case "password":
-			cfg.Cfg.Password = val
-		case "port":
-			if v, err := strconv.Atoi(val); err == nil && v > 0 {
-				cfg.Port = v
-			}
-		case "mtu":
-			if v, err := strconv.Atoi(val); err == nil && v > 0 {
-				cfg.Cfg.MTU = v
-			}
-		case "encrypt":
-			if v, err := strconv.Atoi(val); err == nil {
-				cfg.Cfg.Encrypt = v
-			}
+	}
+	if v, ok := parsed["encrypt"]; ok {
+		if e, err := strconv.Atoi(v); err == nil {
+			cfg.Cfg.Encrypt = e
 		}
 	}
 	return cfg
 }
 
 // --- helpers ---------------------------------------------------------
-
-// ParseIwanServer reads the server= field from iwan.conf.
-func (m *SdwanManager) ParseIwanServer() string {
-	f, err := os.Open(m.iwanPath)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.TrimSpace(parts[0])
-		if key == "server" {
-			return strings.TrimSpace(parts[1])
-		}
-	}
-	return ""
-}
-
-func (m *SdwanManager) parseIwanMTU() (int, error) {
-	f, err := os.Open(m.iwanPath)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "[") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 || strings.TrimSpace(parts[0]) != "mtu" {
-			continue
-		}
-		mtu, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-		if err != nil || mtu <= 0 {
-			return 0, fmt.Errorf("mtu 配置无效")
-		}
-		return mtu, nil
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, err
-	}
-	return 0, fmt.Errorf("未找到 mtu= 配置")
-}
-
-func (m *SdwanManager) rewriteIwanMTU(mtu int) error {
-	data, err := os.ReadFile(m.iwanPath)
-	if err != nil {
-		return err
-	}
-	lines := strings.Split(string(data), "\n")
-	found := false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "mtu=") || strings.HasPrefix(trimmed, "mtu ") {
-			lines[i] = fmt.Sprintf("mtu=%d", mtu)
-			found = true
-			break
-		}
-	}
-	if !found {
-		return fmt.Errorf("未找到 mtu= 配置")
-	}
-	return os.WriteFile(m.iwanPath, []byte(strings.Join(lines, "\n")), 0644)
-}
 
 func (m *SdwanManager) waitDaemonRelease(controlAddr, token string) bool {
 	deadline := time.Now().Add(8 * time.Second)
@@ -1225,7 +1164,7 @@ func (m *SdwanManager) waitDaemonRelease(controlAddr, token string) bool {
 		m.mu.Unlock()
 		apiReleased := true
 		if token != "" {
-			if _, err := getControlStatus(controlAddr, token); err == nil {
+			if _, err := controlapi.ControlStatusWithTimeout(controlAddr, token, 2*time.Second); err == nil {
 				apiReleased = false
 			}
 		}

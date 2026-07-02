@@ -16,6 +16,7 @@ import (
 	"time"
 
 	controlapi "sdwan-go/pkg/controlapi"
+	protocol "sdwan-go/pkg/protocol"
 )
 
 // loadOrGenerateToken reads a bearer token from the file at tokenPath.
@@ -87,7 +88,7 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 }
 
 // switchServerFunc abstracts Client.SwitchServer so tests can inject a fake.
-type switchServerFunc func(next *Config) (*OPENACKResult, error)
+type switchServerFunc func(next *Config) (*protocol.OPENACKResult, error)
 
 // switchRequest is the expected JSON body for POST /v1/switch.
 type switchRequest struct {
@@ -229,8 +230,5 @@ func startControlServer(addr string, token string, c *Client, shutdownCh chan<- 
 // directory. For example, "/etc/sdwan/iwan.conf" → "/etc/sdwan/control.token".
 func DefaultTokenPath(configPath string) string {
 	dir := filepath.Dir(configPath)
-	if dir == "." {
-		dir = "."
-	}
 	return filepath.Join(dir, "control.token")
 }

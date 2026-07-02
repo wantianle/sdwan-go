@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"reflect"
+	protocol "sdwan-go/pkg/protocol"
 	"testing"
 )
 
@@ -21,23 +22,23 @@ func TestMsgType(t *testing.T) {
 	}{
 		{
 			name:     "valid OPEN packet",
-			input:    []byte{MsgOPEN, 0x00, 0x00, 0x00},
-			expected: MsgOPEN,
+			input:    []byte{protocol.MsgOPEN, 0x00, 0x00, 0x00},
+			expected: protocol.MsgOPEN,
 		},
 		{
 			name:     "valid OPENACK packet",
-			input:    []byte{MsgOPENACK, 0x01, 0x02, 0x03},
-			expected: MsgOPENACK,
+			input:    []byte{protocol.MsgOPENACK, 0x01, 0x02, 0x03},
+			expected: protocol.MsgOPENACK,
 		},
 		{
 			name:     "valid ECHOREQ packet",
-			input:    []byte{MsgECHOREQ},
-			expected: MsgECHOREQ,
+			input:    []byte{protocol.MsgECHOREQ},
+			expected: protocol.MsgECHOREQ,
 		},
 		{
 			name:     "valid DATA packet",
-			input:    []byte{MsgDATA, 0xFF},
-			expected: MsgDATA,
+			input:    []byte{protocol.MsgDATA, 0xFF},
+			expected: protocol.MsgDATA,
 		},
 		{
 			name:     "empty packet",
@@ -61,16 +62,16 @@ func TestMsgType(t *testing.T) {
 		},
 		{
 			name:     "TUNSetup packet",
-			input:    []byte{MsgTUNSetup, 0x00, 0x01},
-			expected: MsgTUNSetup,
+			input:    []byte{protocol.MsgTUNSetup, 0x00, 0x01},
+			expected: protocol.MsgTUNSetup,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := MsgType(tt.input)
+			got := protocol.MsgType(tt.input)
 			if got != tt.expected {
-				t.Errorf("MsgType(%v) = 0x%02X, want 0x%02X", tt.input, got, tt.expected)
+				t.Errorf("protocol.MsgType(%v) = 0x%02X, want 0x%02X", tt.input, got, tt.expected)
 			}
 		})
 	}
@@ -97,7 +98,7 @@ func TestPktSignRoundTrip(t *testing.T) {
 			name: "ECHOREQ header with session",
 			header: func() []byte {
 				h := make([]byte, 24)
-				h[0] = MsgECHOREQ
+				h[0] = protocol.MsgECHOREQ
 				binary.BigEndian.PutUint16(h[2:4], 0x1234)
 				binary.BigEndian.PutUint32(h[4:8], 42)
 				return h
@@ -116,7 +117,7 @@ func TestPktSignRoundTrip(t *testing.T) {
 			copy(orig, tt.header)
 
 			// Sign the header
-			sig := PktSign(tt.header)
+			sig := protocol.PktSign(tt.header)
 			if len(sig) != 16 {
 				t.Errorf("PktSign returned %d bytes, want 16", len(sig))
 			}
@@ -125,7 +126,7 @@ func TestPktSignRoundTrip(t *testing.T) {
 			copy(tt.header[8:24], sig)
 
 			// Verify returns true
-			if !PktVerify(tt.header) {
+			if !protocol.PktVerify(tt.header) {
 				t.Error("PktVerify returned false for valid signature")
 			}
 
@@ -133,7 +134,7 @@ func TestPktSignRoundTrip(t *testing.T) {
 			tampered := make([]byte, len(tt.header))
 			copy(tampered, tt.header)
 			tampered[8] ^= 0x01
-			if PktVerify(tampered) {
+			if protocol.PktVerify(tampered) {
 				t.Error("PktVerify returned true for tampered signature (byte 8)")
 			}
 
@@ -141,15 +142,15 @@ func TestPktSignRoundTrip(t *testing.T) {
 			tampered2 := make([]byte, len(orig))
 			copy(tampered2, orig)
 			tampered2[0] ^= 0x01
-			sig2 := PktSign(tampered2)
+			sig2 := protocol.PktSign(tampered2)
 			copy(tampered2[8:24], sig2)
 			tampered2[0] ^= 0x01 // revert header but keep old sig
-			if PktVerify(tampered2) {
+			if protocol.PktVerify(tampered2) {
 				t.Error("PktVerify returned true for header-data mismatch")
 			}
 
 			// Verify original header still passes
-			if !PktVerify(tt.header) {
+			if !protocol.PktVerify(tt.header) {
 				t.Error("PktVerify returned false for original header after tampering checks")
 			}
 		})
@@ -159,8 +160,8 @@ func TestPktSignRoundTrip(t *testing.T) {
 func TestPktSignDeterministic(t *testing.T) {
 	header := []byte{0x13, 0x01, 0x12, 0x34, 0x00, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 
-	sig1 := PktSign(header)
-	sig2 := PktSign(header)
+	sig1 := protocol.PktSign(header)
+	sig2 := protocol.PktSign(header)
 
 	if !bytes.Equal(sig1, sig2) {
 		t.Error("PktSign is not deterministic: same header produced different signatures")
@@ -180,14 +181,14 @@ func TestPktSignKnownVector(t *testing.T) {
 	h.Write([]byte("mw"))
 	expected := h.Sum(nil)
 
-	got := PktSign(header)
+	got := protocol.PktSign(header)
 	if !bytes.Equal(got, expected) {
 		t.Errorf("PktSign known-vector mismatch:\n got: %x\nwant: %x", got, expected)
 	}
 
 	// Round-trip verification
 	copy(header[8:24], got)
-	if !PktVerify(header) {
+	if !protocol.PktVerify(header) {
 		t.Error("PktVerify failed for known test vector")
 	}
 }
@@ -196,29 +197,29 @@ func TestPktVerifyEdgeCases(t *testing.T) {
 	t.Run("all zeros header", func(t *testing.T) {
 		header := make([]byte, 24)
 		// Sign and verify
-		sig := PktSign(header)
+		sig := protocol.PktSign(header)
 		copy(header[8:24], sig)
-		if !PktVerify(header) {
+		if !protocol.PktVerify(header) {
 			t.Error("PktVerify failed for all-zeros header")
 		}
 	})
 
 	t.Run("tampered last signature byte", func(t *testing.T) {
 		header := make([]byte, 24)
-		sig := PktSign(header)
+		sig := protocol.PktSign(header)
 		copy(header[8:24], sig)
 		header[23] ^= 0x01
-		if PktVerify(header) {
+		if protocol.PktVerify(header) {
 			t.Error("PktVerify returned true when last byte of signature was tampered")
 		}
 	})
 
 	t.Run("tampered first header byte", func(t *testing.T) {
 		header := []byte{0x13, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-		sig := PktSign(header)
+		sig := protocol.PktSign(header)
 		copy(header[8:24], sig)
 		header[0] = 0xFF
-		if PktVerify(header) {
+		if protocol.PktVerify(header) {
 			t.Error("PktVerify returned true when first header byte was tampered")
 		}
 	})
@@ -268,7 +269,7 @@ func TestEncryptPassword(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := EncryptPassword(tt.username, tt.password)
+			got := protocol.EncryptPassword(tt.username, tt.password)
 
 			// Must return exactly 16 bytes
 			if len(got) != 16 {
@@ -295,7 +296,7 @@ func TestEncryptPassword(t *testing.T) {
 			}
 
 			// Determinism check: calling twice should produce same result
-			got2 := EncryptPassword(tt.username, tt.password)
+			got2 := protocol.EncryptPassword(tt.username, tt.password)
 			if !bytes.Equal(got, got2) {
 				t.Error("EncryptPassword is not deterministic")
 			}
@@ -305,8 +306,8 @@ func TestEncryptPassword(t *testing.T) {
 
 func TestEncryptPasswordDifferentUsersDifferentKeys(t *testing.T) {
 	// Same password, different usernames → different output (different AES key)
-	result1 := EncryptPassword("userA", "samepass")
-	result2 := EncryptPassword("userB", "samepass")
+	result1 := protocol.EncryptPassword("userA", "samepass")
+	result2 := protocol.EncryptPassword("userB", "samepass")
 
 	if bytes.Equal(result1, result2) {
 		t.Error("EncryptPassword produced same output for different usernames")
@@ -315,7 +316,7 @@ func TestEncryptPasswordDifferentUsersDifferentKeys(t *testing.T) {
 
 func TestEncryptPasswordEmptyUsername(t *testing.T) {
 	// Key = MD5("mw" + "") = MD5("mw")
-	result := EncryptPassword("", "test")
+	result := protocol.EncryptPassword("", "test")
 
 	h := md5.New()
 	h.Write([]byte("mw"))
@@ -338,11 +339,11 @@ func TestEncryptPasswordEmptyUsername(t *testing.T) {
 func TestBuildOpenPacket(t *testing.T) {
 	tests := []struct {
 		name   string
-		config OpenConfig
+		config protocol.OpenConfig
 	}{
 		{
 			name: "default config without encrypt",
-			config: OpenConfig{
+			config: protocol.OpenConfig{
 				Username: "testuser",
 				Password: "testpass",
 				MTU:      1436,
@@ -351,7 +352,7 @@ func TestBuildOpenPacket(t *testing.T) {
 		},
 		{
 			name: "config with encrypt flag set",
-			config: OpenConfig{
+			config: protocol.OpenConfig{
 				Username: "admin",
 				Password: "secret",
 				MTU:      1500,
@@ -360,7 +361,7 @@ func TestBuildOpenPacket(t *testing.T) {
 		},
 		{
 			name: "config with max MTU",
-			config: OpenConfig{
+			config: protocol.OpenConfig{
 				Username: "u",
 				Password: "p",
 				MTU:      65535,
@@ -371,7 +372,7 @@ func TestBuildOpenPacket(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pkt := BuildOpenPacket(tt.config)
+			pkt := protocol.BuildOpenPacket(tt.config)
 
 			// Minimum size: header(24) + TLV1(4) + TLV2(2+len(username)) + TLV3(2+16)
 			// + optional encrypt TLV(3)
@@ -387,8 +388,8 @@ func TestBuildOpenPacket(t *testing.T) {
 			}
 
 			// Header field: msg type = 0x13 (OPEN)
-			if pkt[0] != MsgOPEN {
-				t.Errorf("pkt[0] = 0x%02X, want 0x13 (MsgOPEN)", pkt[0])
+			if pkt[0] != protocol.MsgOPEN {
+				t.Errorf("pkt[0] = 0x%02X, want 0x13 (protocol.MsgOPEN)", pkt[0])
 			}
 
 			// Header field: encrypt flag
@@ -409,7 +410,7 @@ func TestBuildOpenPacket(t *testing.T) {
 			}
 
 			// Bytes 8-23: signature (16 bytes), should be valid
-			if !PktVerify(pkt[:24]) {
+			if !protocol.PktVerify(pkt[:24]) {
 				t.Error("PktVerify failed for BuildOpenPacket header signature")
 			}
 
@@ -458,17 +459,17 @@ func TestBuildOpenPacket(t *testing.T) {
 }
 
 func TestBuildOpenPacketSignatureIntegrity(t *testing.T) {
-	cfg := OpenConfig{
+	cfg := protocol.OpenConfig{
 		Username: "signeduser",
 		Password: "signedpass",
 		MTU:      1436,
 	}
 
-	pkt := BuildOpenPacket(cfg)
+	pkt := protocol.BuildOpenPacket(cfg)
 
 	// Tamper with payload after signing, header signature should still be valid
 	// (signature only covers header, which is unchanged)
-	if !PktVerify(pkt[:24]) {
+	if !protocol.PktVerify(pkt[:24]) {
 		t.Error("header signature invalid after build")
 	}
 
@@ -476,7 +477,7 @@ func TestBuildOpenPacketSignatureIntegrity(t *testing.T) {
 	tampered := make([]byte, len(pkt))
 	copy(tampered, pkt)
 	tampered[0] = 0xFF
-	if PktVerify(tampered[:24]) {
+	if protocol.PktVerify(tampered[:24]) {
 		t.Error("tampered header passed signature check")
 	}
 }
@@ -526,16 +527,16 @@ func TestBuildEchoReq(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pkt := BuildEchoReq(tt.sessionID, tt.seq, tt.timestamp, tt.pipeID, tt.pipeIdx, tt.echoCnt)
+			pkt := protocol.BuildEchoReq(tt.sessionID, tt.seq, tt.timestamp, tt.pipeID, tt.pipeIdx, tt.echoCnt)
 
 			// Packet must be exactly 60 bytes
 			if len(pkt) != 60 {
 				t.Errorf("packet length = %d, want 60", len(pkt))
 			}
 
-			// buf[0] = MsgECHOREQ (0x15)
-			if pkt[0] != MsgECHOREQ {
-				t.Errorf("pkt[0] = 0x%02X, want 0x15 (MsgECHOREQ)", pkt[0])
+			// buf[0] = protocol.MsgECHOREQ (0x15)
+			if pkt[0] != protocol.MsgECHOREQ {
+				t.Errorf("pkt[0] = 0x%02X, want 0x15 (protocol.MsgECHOREQ)", pkt[0])
 			}
 
 			// buf[1] = 0x00
@@ -556,7 +557,7 @@ func TestBuildEchoReq(t *testing.T) {
 			}
 
 			// Header signature (buf[8:24]) should be valid
-			if !PktVerify(pkt[:24]) {
+			if !protocol.PktVerify(pkt[:24]) {
 				t.Error("PktVerify failed for BuildEchoReq header")
 			}
 
@@ -633,15 +634,15 @@ func TestParseSessionID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := ParseSessionID(tt.data)
+			got, ok := protocol.ParseSessionID(tt.data)
 			if !ok {
 				if len(tt.data) >= 4 {
-					t.Errorf("ParseSessionID(%x) returned false", tt.data)
+					t.Errorf("protocol.ParseSessionID(%x) returned false", tt.data)
 				}
 				return
 			}
 			if got != tt.expected {
-				t.Errorf("ParseSessionID(%x) = 0x%04X, want 0x%04X", tt.data, got, tt.expected)
+				t.Errorf("protocol.ParseSessionID(%x) = 0x%04X, want 0x%04X", tt.data, got, tt.expected)
 			}
 		})
 	}
@@ -681,9 +682,9 @@ func TestParseOPENACKSeq(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ParseOPENACKSeq(tt.data)
+			got := protocol.ParseOPENACKSeq(tt.data)
 			if got != tt.expected {
-				t.Errorf("ParseOPENACKSeq(%x) = %d, want %d", tt.data, got, tt.expected)
+				t.Errorf("protocol.ParseOPENACKSeq(%x) = %d, want %d", tt.data, got, tt.expected)
 			}
 		})
 	}
@@ -700,14 +701,14 @@ func TestParseOPENACK(t *testing.T) {
 		buf := make([]byte, 256)
 		pos := 0
 
-		buf[0] = MsgOPENACK // 0x12
+		buf[0] = protocol.MsgOPENACK // 0x12
 		buf[1] = 0x00
 		binary.BigEndian.PutUint16(buf[2:4], 0x0001) // session_id
 		binary.BigEndian.PutUint32(buf[4:8], 1)      // seq
 		pos += 8
 		copy(buf[pos:pos+16], make([]byte, 16)) // signature placeholder
 		// Actually sign the header
-		PktSignInPlace(buf[:24])
+		protocol.PktSignInPlace(buf[:24])
 		pos = 24
 
 		// TLV type=3 (MTU): length=4, value=2 bytes big-endian
@@ -750,7 +751,7 @@ func TestParseOPENACK(t *testing.T) {
 		pos += 6
 
 		data := buf[:pos]
-		result := ParseOPENACK(data)
+		result := protocol.ParseOPENACK(data)
 
 		if result == nil {
 			t.Fatal("ParseOPENACK returned nil")
@@ -772,11 +773,11 @@ func TestParseOPENACK(t *testing.T) {
 
 	t.Run("OPENACK with DNS but no GatewayIP", func(t *testing.T) {
 		buf := make([]byte, 256)
-		buf[0] = MsgOPENACK
+		buf[0] = protocol.MsgOPENACK
 		buf[1] = 0x00
 		binary.BigEndian.PutUint16(buf[2:4], 0x0042)
 		binary.BigEndian.PutUint32(buf[4:8], 100)
-		PktSignInPlace(buf[:24])
+		protocol.PktSignInPlace(buf[:24])
 
 		// Only MTU and DNS TLVs
 		pos := 24
@@ -794,7 +795,7 @@ func TestParseOPENACK(t *testing.T) {
 		pos += 6
 
 		data := buf[:pos]
-		result := ParseOPENACK(data)
+		result := protocol.ParseOPENACK(data)
 
 		if result == nil {
 			t.Fatal("ParseOPENACK returned nil")
@@ -815,13 +816,13 @@ func TestParseOPENACK(t *testing.T) {
 
 	t.Run("empty OPENACK (header only)", func(t *testing.T) {
 		buf := make([]byte, 24)
-		buf[0] = MsgOPENACK
+		buf[0] = protocol.MsgOPENACK
 		buf[1] = 0x00
 		binary.BigEndian.PutUint16(buf[2:4], 0x0001)
 		binary.BigEndian.PutUint32(buf[4:8], 1)
-		PktSignInPlace(buf[:24])
+		protocol.PktSignInPlace(buf[:24])
 
-		result := ParseOPENACK(buf)
+		result := protocol.ParseOPENACK(buf)
 
 		if result == nil {
 			t.Fatal("ParseOPENACK returned nil")
@@ -843,11 +844,11 @@ func TestParseOPENACK(t *testing.T) {
 
 	t.Run("OPENACK with malformed TLV (length too short)", func(t *testing.T) {
 		buf := make([]byte, 256)
-		buf[0] = MsgOPENACK
+		buf[0] = protocol.MsgOPENACK
 		buf[1] = 0x00
 		binary.BigEndian.PutUint16(buf[2:4], 1)
 		binary.BigEndian.PutUint32(buf[4:8], 1)
-		PktSignInPlace(buf[:24])
+		protocol.PktSignInPlace(buf[:24])
 
 		// TLV with length=1 (invalid: need at least 2 for type+length)
 		pos := 24
@@ -856,7 +857,7 @@ func TestParseOPENACK(t *testing.T) {
 		pos += 1          // won't be consumed fully
 
 		data := buf[:pos+1]
-		result := ParseOPENACK(data)
+		result := protocol.ParseOPENACK(data)
 
 		if result == nil {
 			t.Fatal("ParseOPENACK returned nil")
@@ -869,11 +870,11 @@ func TestParseOPENACK(t *testing.T) {
 
 	t.Run("OPENACK with TLV exceeding buffer", func(t *testing.T) {
 		buf := make([]byte, 30)
-		buf[0] = MsgOPENACK
+		buf[0] = protocol.MsgOPENACK
 		buf[1] = 0x00
 		binary.BigEndian.PutUint16(buf[2:4], 1)
 		binary.BigEndian.PutUint32(buf[4:8], 1)
-		PktSignInPlace(buf[:24])
+		protocol.PktSignInPlace(buf[:24])
 
 		// TLV at pos 24 claiming length=100 (exceeds buffer)
 		pos := 24
@@ -882,7 +883,7 @@ func TestParseOPENACK(t *testing.T) {
 		pos += 2
 
 		data := buf[:pos]
-		result := ParseOPENACK(data)
+		result := protocol.ParseOPENACK(data)
 
 		if result == nil {
 			t.Fatal("ParseOPENACK returned nil")
@@ -894,15 +895,15 @@ func TestParseOPENACK(t *testing.T) {
 		// TLV type=4 (LocalIP) claims length=6 but only has 5 bytes total
 		// (needs 6: 1 byte type + 1 byte len + 4 bytes IP)
 		buf := make([]byte, 24)
-		buf[0] = MsgOPENACK
+		buf[0] = protocol.MsgOPENACK
 		buf[1] = 0x00
 		binary.BigEndian.PutUint16(buf[2:4], 1)
 		binary.BigEndian.PutUint32(buf[4:8], 1)
-		PktSignInPlace(buf[:24])
+		protocol.PktSignInPlace(buf[:24])
 
 		// Only 2 extra bytes after header, but TLV says length=6
 		data := append(buf, 0x04, 0x06, 0x0A) // type=4, len=6, but only 3 bytes after header
-		result := ParseOPENACK(data)
+		result := protocol.ParseOPENACK(data)
 
 		if result == nil {
 			t.Fatal("ParseOPENACK returned nil")
@@ -916,13 +917,13 @@ func TestParseOPENACK(t *testing.T) {
 	t.Run("error response (msg type 0x12 but with error flags)", func(t *testing.T) {
 		// Sometimes OPENACK can have an error flag in byte 1
 		buf := make([]byte, 24)
-		buf[0] = MsgOPENACK
+		buf[0] = protocol.MsgOPENACK
 		buf[1] = 0xFF // error flag
 		binary.BigEndian.PutUint16(buf[2:4], 0)
 		binary.BigEndian.PutUint32(buf[4:8], 0)
-		PktSignInPlace(buf[:24])
+		protocol.PktSignInPlace(buf[:24])
 
-		result := ParseOPENACK(buf)
+		result := protocol.ParseOPENACK(buf)
 
 		if result == nil {
 			t.Fatal("ParseOPENACK returned nil for error response")
@@ -941,17 +942,17 @@ func TestParseOPENACK(t *testing.T) {
 func TestSessionIDSeqRoundTrip(t *testing.T) {
 	// Simulate: build a response header, then parse it back
 	buf := make([]byte, 24)
-	buf[0] = MsgOPENACK
+	buf[0] = protocol.MsgOPENACK
 	binary.BigEndian.PutUint16(buf[2:4], 0xABCD)
 	binary.BigEndian.PutUint32(buf[4:8], 0x12345678)
-	PktSignInPlace(buf[:24])
+	protocol.PktSignInPlace(buf[:24])
 
-	sid, ok := ParseSessionID(buf)
+	sid, ok := protocol.ParseSessionID(buf)
 	if !ok || sid != 0xABCD {
 		t.Errorf("ParseSessionID = 0x%04X (ok=%v), want 0xABCD", sid, ok)
 	}
 
-	seq := ParseOPENACKSeq(buf)
+	seq := protocol.ParseOPENACKSeq(buf)
 	if seq != 0x12345678 {
 		t.Errorf("ParseOPENACKSeq = 0x%08X, want 0x12345678", seq)
 	}
@@ -964,12 +965,12 @@ func TestSessionIDSeqRoundTrip(t *testing.T) {
 func TestMessageConstants(t *testing.T) {
 	// Verify all message type constants are distinct and non-zero
 	types := map[string]byte{
-		"MsgOPENACK":  MsgOPENACK,
-		"MsgOPEN":     MsgOPEN,
-		"MsgTUNSetup": MsgTUNSetup,
-		"MsgECHOREQ":  MsgECHOREQ,
-		"MsgECHORESP": MsgECHORESP,
-		"MsgDATA":     MsgDATA,
+		"protocol.MsgOPENACK":  protocol.MsgOPENACK,
+		"protocol.MsgOPEN":     protocol.MsgOPEN,
+		"protocol.MsgTUNSetup": protocol.MsgTUNSetup,
+		"protocol.MsgECHOREQ":  protocol.MsgECHOREQ,
+		"protocol.MsgECHORESP": protocol.MsgECHORESP,
+		"protocol.MsgDATA":     protocol.MsgDATA,
 	}
 
 	seen := make(map[byte]string)
@@ -984,30 +985,30 @@ func TestMessageConstants(t *testing.T) {
 	}
 
 	// Verify specific expected values (from reverse engineering)
-	if MsgOPENACK != 0x12 {
-		t.Errorf("MsgOPENACK = 0x%02X, want 0x12", MsgOPENACK)
+	if protocol.MsgOPENACK != 0x12 {
+		t.Errorf("protocol.MsgOPENACK = 0x%02X, want 0x12", protocol.MsgOPENACK)
 	}
-	if MsgOPEN != 0x13 {
-		t.Errorf("MsgOPEN = 0x%02X, want 0x13", MsgOPEN)
+	if protocol.MsgOPEN != 0x13 {
+		t.Errorf("protocol.MsgOPEN = 0x%02X, want 0x13", protocol.MsgOPEN)
 	}
-	if MsgECHOREQ != 0x15 {
-		t.Errorf("MsgECHOREQ = 0x%02X, want 0x15", MsgECHOREQ)
+	if protocol.MsgECHOREQ != 0x15 {
+		t.Errorf("protocol.MsgECHOREQ = 0x%02X, want 0x15", protocol.MsgECHOREQ)
 	}
-	if MsgECHORESP != 0x16 {
-		t.Errorf("MsgECHORESP = 0x%02X, want 0x16", MsgECHORESP)
+	if protocol.MsgECHORESP != 0x16 {
+		t.Errorf("protocol.MsgECHORESP = 0x%02X, want 0x16", protocol.MsgECHORESP)
 	}
-	if MsgDATA != 0x18 {
-		t.Errorf("MsgDATA = 0x%02X, want 0x18", MsgDATA)
+	if protocol.MsgDATA != 0x18 {
+		t.Errorf("protocol.MsgDATA = 0x%02X, want 0x18", protocol.MsgDATA)
 	}
 }
 
 // =============================================================================
-// OPENACKResult type checks
+// protocol.OPENACKResult type checks
 // =============================================================================
 
 func TestOPENACKResultType(t *testing.T) {
-	// Verify OPENACKResult struct has expected fields
-	r := OPENACKResult{
+	// Verify protocol.OPENACKResult struct has expected fields
+	r := protocol.OPENACKResult{
 		LocalIP:   "10.0.0.2",
 		GatewayIP: "10.0.0.1",
 		DNSIP:     "8.8.8.8",
@@ -1024,7 +1025,7 @@ func TestOPENACKResultType(t *testing.T) {
 	expectedFields := []string{"LocalIP", "GatewayIP", "DNSIP", "MTU", "GateMAC"}
 	for _, f := range expectedFields {
 		if !fieldNames[f] {
-			t.Errorf("OPENACKResult missing field %q", f)
+			t.Errorf("protocol.OPENACKResult missing field %q", f)
 		}
 	}
 

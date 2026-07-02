@@ -9,6 +9,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	protocol "sdwan-go/pkg/protocol"
 )
 
 // RunOnce loads iwan.conf from configPath and runs the full one-shot SD-WAN
@@ -28,10 +30,7 @@ func RunOnce(configPath string) error {
 		cfg.Server, cfg.Port, cfg.Username, cfg.MTU, cfg.Encrypt)
 
 	// 2. Create client
-	client, err := NewClient(cfg)
-	if err != nil {
-		return fmt.Errorf("create client: %w", err)
-	}
+	client := NewClient(cfg)
 	defer client.Close()
 
 	// 3. Connect to server
@@ -49,7 +48,7 @@ func RunOnce(configPath string) error {
 	log.Println("[AUTH] Authenticated successfully")
 
 	// Parse TUN configuration from OPENACK
-	tunCfg := ParseOPENACK(openAck)
+	tunCfg := protocol.ParseOPENACK(openAck)
 	if tunCfg.LocalIP == "" || tunCfg.GatewayIP == "" {
 		return fmt.Errorf("OPENACK missing IP info: local=%q gateway=%q",
 			tunCfg.LocalIP, tunCfg.GatewayIP)
@@ -134,7 +133,7 @@ func tryStartup(client *Client, cfg *Config) {
 				log.Printf("[FATAL] Startup: auth rejected (not retrying)")
 				return
 			}
-			backoff = sleepWithBackoff(client, backoff, cfg)
+			backoff = sleepWithBackoff(client, backoff)
 			continue
 		}
 		log.Printf("[INFO] UDP connected to %s:%d", cfg.Server, cfg.Port)
@@ -148,16 +147,16 @@ func tryStartup(client *Client, cfg *Config) {
 				log.Printf("[FATAL] Startup: auth rejected (not retrying)")
 				return
 			}
-			backoff = sleepWithBackoff(client, backoff, cfg)
+			backoff = sleepWithBackoff(client, backoff)
 			continue
 		}
 		log.Println("[AUTH] Authenticated successfully")
 
 		// 3. Parse OPENACK
-		tunCfg := ParseOPENACK(openAck)
+		tunCfg := protocol.ParseOPENACK(openAck)
 		if tunCfg.LocalIP == "" || tunCfg.GatewayIP == "" {
 			log.Printf("[STARTUP] OPENACK missing IP info: local=%q gateway=%q", tunCfg.LocalIP, tunCfg.GatewayIP)
-			backoff = sleepWithBackoff(client, backoff, cfg)
+			backoff = sleepWithBackoff(client, backoff)
 			continue
 		}
 		log.Printf("[TUN] Local IP=%s Gateway=%s DNS=%s MTU=%d", tunCfg.LocalIP, tunCfg.GatewayIP, tunCfg.DNSIP, tunCfg.MTU)
@@ -173,7 +172,7 @@ func tryStartup(client *Client, cfg *Config) {
 			log.Printf("[STARTUP] TUN setup failed: %v", err)
 			client.TUN = nil // clear TUN on failure
 			// setupTUN already cleans up on failure
-			backoff = sleepWithBackoff(client, backoff, cfg)
+			backoff = sleepWithBackoff(client, backoff)
 			continue
 		}
 		// Store cleanup so RunDaemon's deferred Close() tears down TUN + routes
@@ -186,7 +185,7 @@ func tryStartup(client *Client, cfg *Config) {
 			log.Printf("[STARTUP] Daemon start failed: %v", err)
 			tunCleanup()     // tear down TUN/routes we just created
 			client.TUN = nil // clear TUN reference
-			backoff = sleepWithBackoff(client, backoff, cfg)
+			backoff = sleepWithBackoff(client, backoff)
 			continue
 		}
 
@@ -225,7 +224,7 @@ func isAuthRejection(err error) bool {
 		strings.Contains(msg, "authentication failed")
 }
 
-func sleepWithBackoff(client *Client, backoff time.Duration, cfg *Config) time.Duration {
+func sleepWithBackoff(client *Client, backoff time.Duration) time.Duration {
 	select {
 	case <-client.stopCh:
 		return backoff
@@ -257,10 +256,7 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 		cfg.Server, cfg.Port, cfg.Username, cfg.MTU, cfg.Encrypt)
 
 	// 2. Create client
-	client, err := NewClient(cfg)
-	if err != nil {
-		return fmt.Errorf("create client: %w", err)
-	}
+	client := NewClient(cfg)
 	defer client.Close()
 
 	// 3. Load or generate control token
@@ -318,7 +314,7 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 // setupTUN creates the TUN adapter, assigns the server-assigned IP,
 // and adds the route with retry. Returns the adapter name and a cleanup
 // function that caller must defer (DelRoute + CloseTUN).
-func setupTUN(cfg *Config, tunCfg *OPENACKResult, client *Client) (tunName string, cleanup func(), err error) {
+func setupTUN(cfg *Config, tunCfg *protocol.OPENACKResult, client *Client) (tunName string, cleanup func(), err error) {
 	localCIDR := tunCfg.LocalIP + "/24"
 	tun, err := CreateTUN(cfg.TUNName, cfg.MTU, localCIDR)
 	if err != nil {
