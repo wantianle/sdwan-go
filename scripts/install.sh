@@ -373,6 +373,8 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+    # Capture timestamp before starting so verify_tunnel can filter current-attempt logs
+    SERVICE_START_TS=$(date +'%Y-%m-%d %H:%M:%S')
     systemctl daemon-reload
     systemctl enable --now sdwan
     sleep 2
@@ -414,59 +416,77 @@ install_macos_service() {
 </plist>
 EOF
 
+    # Truncate log before starting to avoid stale-log poisoning
+    : > /var/log/sdwan.log 2>/dev/null || true
     launchctl bootstrap system "$plist" 2>/dev/null || launchctl load "$plist"
     echo -e "${G}✅ LaunchDaemon 已安装并启动${NC}"
 }
 
 # ────────────────────────────────────────────────────────────
-# verify_tunnel polls the daemon logs/network state for up to 15s.
-# Returns: 0 = running, 1 = auth rejected, 2 = timeout/unknown.
+# auth_rejected_current_attempt checks the service logs for an
+# AUTH REJECTED marker that appeared after the current attempt
+# started. Returns 0 if found, 1 otherwise.
+auth_rejected_current_attempt() {
+    local logs=""
+    if [[ "$OS" == "linux" ]]; then
+        logs=$(journalctl -u sdwan --since "$SERVICE_START_TS" --no-pager 2>/dev/null || true)
+    else
+        logs=$(tail -n 80 /var/log/sdwan.log 2>/dev/null || true)
+    fi
+    if printf '%s\n' "$logs" | grep -qi "AUTH REJECTED"; then
+        return 0
+    fi
+    return 1
+}
+
+# ────────────────────────────────────────────────────────────
+# linux_tunnel_ready checks real network state for a ready
+# Linux tunnel. Returns 0 if iwan1 exists, has IPv4, and
+# route 192.168.0.0/16 points to dev iwan1.
+linux_tunnel_ready() {
+    ip link show iwan1 &>/dev/null || return 1
+    ip -4 addr show iwan1 2>/dev/null | grep -q "inet " || return 1
+    ip route 2>/dev/null | grep -q "192.168.0.0/16.*iwan1" || return 1
+}
+
+# ────────────────────────────────────────────────────────────
+# darwin_tunnel_ready checks real network state for a ready
+# macOS tunnel. Returns 0 if a utun* interface has inet IPv4
+# and route to 192.168.0.0 uses utun.
+darwin_tunnel_ready() {
+    local darwin_ip=""
+    darwin_ip=$(ifconfig 2>/dev/null | awk '/^utun[0-9]+:/{found=1; next} /^[a-z]+[0-9]+:/{found=0} found && /inet /{print $2; exit}' || true)
+    [[ -n "$darwin_ip" ]] || return 1
+    route -n get 192.168.0.0 2>/dev/null | grep -q 'interface: utun' || return 1
+}
+
+# ────────────────────────────────────────────────────────────
+# verify_tunnel polls network state for up to 15s. Success is
+# determined by real network state only (interface, IP, route).
+# Logs are scanned ONLY for AUTH REJECTED markers for the
+# current attempt.
+# Returns: 0 = ready, 1 = auth rejected, 2 = timeout/incomplete.
 verify_tunnel() {
     echo "────────────── 状态检查 ──────────────"
     echo -e "  等待隧道建立 (最多 15s)..."
 
+    local ready=0
     local auth_rejected=0
-    local established=0
-
-    # Record timestamp to prevent stale log entries from previous runs
-    local since_ts
-    if [[ "$OS" == "linux" ]]; then
-        since_ts=$(date +'%Y-%m-%d %H:%M:%S' -d '5 seconds ago' 2>/dev/null || date +'%Y-%m-%d %H:%M:%S')
-    fi
 
     for ((sec=1; sec<=15; sec++)); do
         sleep 1
 
-        # Scan logs for auth/tunnel markers (only latest wins)
-        local logs=""
-        if [[ "$OS" == "linux" ]]; then
-            logs=$(journalctl -u sdwan --since "$since_ts" --no-pager 2>/dev/null || true)
-        else
-            logs=$(tail -n 60 /var/log/sdwan.log 2>/dev/null || true)
-        fi
-        local auth_marker
-        auth_marker=$(printf '%s\n' "$logs" | grep -Ei "AUTH REJECTED|Authenticated successfully|Tunnel established|OPENACK received" | tail -n 1 || true)
-
-        if printf '%s\n' "$auth_marker" | grep -qi "AUTH REJECTED"; then
+        # Check for AUTH REJECTED in current-attempt logs only
+        if [[ $auth_rejected -eq 0 ]] && auth_rejected_current_attempt; then
             auth_rejected=1
             break
-        elif [[ -n "$auth_marker" ]]; then
-            established=1
         fi
 
-        # Check iwan1 / utun
+        # Check real network state
         if [[ "$OS" == "linux" ]]; then
-            if ip link show iwan1 &>/dev/null; then
-                if [[ $established -eq 1 ]]; then
-                    break
-                fi
-            fi
+            linux_tunnel_ready && { ready=1; break; }
         else
-            if ifconfig 2>/dev/null | grep -q "^utun" && ifconfig 2>/dev/null | awk '/^utun[0-9]+:/{found=1; next} /^[a-z]+[0-9]+:/{found=0} found && /inet /{print $2; exit}' | grep -q .; then
-                if [[ $established -eq 1 ]]; then
-                    break
-                fi
-            fi
+            darwin_tunnel_ready && { ready=1; break; }
         fi
     done
 
@@ -504,11 +524,11 @@ verify_tunnel() {
         echo ""
         echo -e "  ${Y}━━━ AUTH REJECTED ━━━${NC}"
         echo -e "  ${R}认证失败：用户名或密码错误，服务器拒绝了连接${NC}"
-        echo ""
-        echo -e "  ${B}请重新输入正确的账号密码${NC}"
         echo "──────────────────────────────────────"
         return 1
-    elif [[ $established -eq 1 ]]; then
+    fi
+
+    if [[ $ready -eq 1 ]]; then
         echo -e "  认证/隧道:${G} 已建立${NC}"
     else
         echo -e "  认证/隧道:${Y} 超时未建立，请检查网络和配置${NC}"
@@ -516,7 +536,7 @@ verify_tunnel() {
         return 2
     fi
 
-    # Ping 3 times with 1s gaps — route may need a moment to take effect
+    # Ping 3 times with 1s gaps — warning-only, must not decide success
     local ping_ok=0
     for _ in 1 2 3; do
         sleep 1
@@ -550,45 +570,6 @@ show_postinstall_help() {
     echo -e "${Y}💡 修改配置: sudo vi /etc/sdwan/iwan.conf && sudo systemctl restart sdwan${NC}"
 }
 
-# re_enter_credentials prompts the user to re-enter username/password,
-# rewrites the config, and restarts the service.
-re_enter_credentials() {
-    echo ""
-    echo -e "${Y}━━━ 重新输入账号密码 ━━━${NC}"
-    local confirm="y"
-    read -rp "确认重新输入? (y/n, 直接回车=y): " confirm </dev/tty
-    [[ -z "$confirm" ]] && confirm="y"
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        echo -e "${Y}已取消，使用原有密码继续${NC}"
-        return 0
-    fi
-    while true; do
-        read -rp "👤 工号 (username): " USERNAME </dev/tty
-        [[ -n "${USERNAME//[[:space:]]/}" ]] && break
-        echo -e "${Y}用户名不能为空${NC}"
-    done
-    while true; do
-        read -rsp "🔑 密码 (password): " PASSWORD </dev/tty
-        echo
-        [[ -n "$PASSWORD" ]] && break
-        echo -e "${Y}密码不能为空${NC}"
-    done
-
-    # preserve the probed/chosen MTU from the existing config
-    local mtu
-    mtu=$(awk -F= '/^mtu=/{print $2}' "$CONFIG_FILE" 2>/dev/null || true)
-    [[ -z "$mtu" || ! "$mtu" =~ ^[0-9]+$ ]] && mtu=1436
-
-    write_config "$SERVER" "$USERNAME" "$PASSWORD" "$mtu"
-    echo -e "${G}  配置已更新，重启服务...${NC}"
-    case "$OS" in
-        linux)  systemctl restart sdwan ;;
-        darwin) launchctl kickstart -k system/com.sdwan.tunnel 2>/dev/null || true ;;
-    esac
-    return 0
-}
-
-# ────────────────────────────────────────────────────────────
 main() {
     parse_args "$@"
     check_root
@@ -622,27 +603,32 @@ main() {
         darwin) install_macos_service ;;
     esac
 
-    # Verify tunnel; if AUTH REJECTED, offer credential re-entry.
-    set +e
+    # Verify tunnel; report results.
     verify_tunnel
     local vresult=$?
-    while [[ $vresult -eq 1 ]]; do
-        echo ""
-        echo -e "${Y}AUTH REJECTED - 请重新输入正确的账号密码${NC}"
-        re_enter_credentials
-        verify_tunnel
-        vresult=$?
-    done
-    set -e
 
-    if [[ $vresult -eq 0 ]]; then
+    if [[ $vresult -eq 1 ]]; then
+        echo ""
+        echo -e "${R}━━━ AUTH REJECTED ━━━${NC}"
+        echo -e "${Y}认证被拒绝：请按以下步骤修改配置后重新启动服务：${NC}"
+        echo ""
+        if [[ "$OS" == "linux" ]]; then
+            echo "  sudo vi $CONFIG_FILE"
+            echo "  sudo systemctl restart sdwan"
+            echo "  sudo journalctl -u sdwan -f -n 20"
+        else
+            echo "  sudo vi $CONFIG_FILE"
+            echo "  sudo launchctl kickstart -k system/com.minieye.sdwan"
+            echo "  tail -f /var/log/sdwan.log"
+        fi
+    elif [[ $vresult -eq 0 ]]; then
         show_postinstall_help
     else
         echo ""
         echo -e "${Y}⚠️  隧道未能在 15s 内建立，请检查网络后手动重启:${NC}"
         case "$OS" in
             linux)  echo "   sudo systemctl restart sdwan" ;;
-            darwin) echo "   sudo launchctl kickstart -k system/com.sdwan.tunnel" ;;
+            darwin) echo "   sudo launchctl kickstart -k system/com.minieye.sdwan" ;;
         esac
     fi
 }

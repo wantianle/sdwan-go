@@ -402,36 +402,48 @@ function Test-PostInstallStatus {
     Write-Host "  Validating tunnel startup (up to 15s)..." -ForegroundColor Cyan
 
     $authRejected = $false
-    $established = $false
-    $lastMarker = ""
     $sdwanIP = $null
+    $routeOK = $false
 
     for ($i = 0; $i -lt 15; $i++) {
         Start-Sleep -Seconds 1
         Write-Host -NoNewline "`r  ... $i s / 15 s"
 
-        if (Test-Path $logPath) {
-            $logText = Get-Content -Path $logPath -Tail 160 -ErrorAction SilentlyContinue | Out-String
-            $markers = [regex]::Matches($logText, "AUTH REJECTED|Authenticated successfully|Tunnel established|OPENACK received", [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-            if ($markers.Count -gt 0) {
-                $lastMarker = $markers[$markers.Count - 1].Value
-                $authRejected = $lastMarker -eq "AUTH REJECTED"
-                $established = $lastMarker -ne "AUTH REJECTED"
-                if ($authRejected) { break }
+        # Scan logs ONLY for AUTH REJECTED — not for success
+        if (-not $authRejected -and (Test-Path $logPath)) {
+            $logText = Get-Content -Path $logPath -Tail 80 -ErrorAction SilentlyContinue | Out-String
+            if ($logText -match "AUTH REJECTED") {
+                $authRejected = $true
+                break
             }
         }
 
-        try {
-            $ipObj = Get-NetIPAddress -InterfaceAlias "iwan1" -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($ipObj) { $sdwanIP = $ipObj.IPAddress }
-        } catch {}
+        # Check iwan1 IPv4
         if (-not $sdwanIP) {
-            $netsh = netsh interface ip show addresses "iwan1" 2>$null | Out-String
-            if ($netsh -match "IP Address:\s*([0-9\.]+)") { $sdwanIP = $Matches[1] }
+            try {
+                $ipObj = Get-NetIPAddress -InterfaceAlias "iwan1" -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($ipObj) { $sdwanIP = $ipObj.IPAddress }
+            } catch {}
+            if (-not $sdwanIP) {
+                $netsh = netsh interface ip show addresses "iwan1" 2>$null | Out-String
+                if ($netsh -match "IP Address:\s*([0-9\.]+)") { $sdwanIP = $Matches[1] }
+            }
         }
 
-        # Stop waiting if tunnel is established and iwan1 appears
-        if ($established -and $sdwanIP) {
+        # Check route 192.168.0.0/16 via iwan1
+        if (-not $routeOK) {
+            try {
+                $rt = Get-NetRoute -DestinationPrefix "192.168.0.0/16" -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -eq "iwan1" }
+                if ($rt) { $routeOK = $true }
+            } catch {}
+            if (-not $routeOK) {
+                $rtPrint = route print 192.168.0.0 2>$null | Out-String
+                if ($rtPrint -match "192\.168\.0\.0.*iwan1") { $routeOK = $true }
+            }
+        }
+
+        # Stop waiting if iwan1 has IPv4 and route is present
+        if ($sdwanIP -and $routeOK) {
             Write-Host ""
             break
         }
@@ -444,10 +456,16 @@ function Test-PostInstallStatus {
         Write-Host "  iwan1 IPv4 not detected" -ForegroundColor Yellow
     }
 
+    if ($routeOK) {
+        Write-Host "  Route: 192.168.0.0/16 -> iwan1" -ForegroundColor Green
+    } else {
+        Write-Host "  Route: 192.168.0.0/16 -> iwan1 not confirmed" -ForegroundColor Yellow
+    }
+
     if ($authRejected) {
         Write-Host "  AUTH REJECTED: check username/password" -ForegroundColor Red
         return 1   # auth rejected
-    } elseif ($established) {
+    } elseif ($sdwanIP -and $routeOK) {
         Write-Host "  Tunnel status: established" -ForegroundColor Green
     } else {
         Write-Host "  Tunnel status: timeout/unknown" -ForegroundColor Yellow
@@ -470,75 +488,19 @@ function Test-PostInstallStatus {
     return 0   # ok
 }
 
-function ReEnterCredentials {
-    Write-Host ""
-    Write-Host "--- Re-enter credentials ---" -ForegroundColor Yellow
-
-    # Kill panel and daemon so old process doesn't hold old credentials
-    Write-Host "  Stopping existing tunnel..." -ForegroundColor Gray
-    & taskkill /f /im panel.exe 2>$null | Out-Null
-    & taskkill /f /im sdwan-windows-amd64.exe 2>$null | Out-Null
-    Start-Sleep -Seconds 2
-
-    do {
-        $Username = Read-Host -Prompt "  Username"
-        if ([string]::IsNullOrWhiteSpace($Username)) {
-            Write-Host "  Username cannot be empty" -ForegroundColor Yellow
-        }
-    } while ([string]::IsNullOrWhiteSpace($Username))
-
-    do {
-        $Password = Read-Host -Prompt "  Password" -AsSecureString
-        $PasswordPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
-        )
-        if ([string]::IsNullOrWhiteSpace($PasswordPlain)) {
-            Write-Host "  Password cannot be empty" -ForegroundColor Yellow
-        }
-    } while ([string]::IsNullOrWhiteSpace($PasswordPlain))
-
-    # Update iwan.conf
-    $iwanPath = Join-Path $INSTALL_DIR "iwan.conf"
-    if (Test-Path $iwanPath) {
-        $lines = Get-Content $iwanPath
-        $newLines = @()
-        foreach ($line in $lines) {
-            if ($line -match '^username\s*=') {
-                $newLines += "username=$Username"
-            } elseif ($line -match '^password\s*=') {
-                $newLines += "password=$PasswordPlain"
-            } else {
-                $newLines += $line
-            }
-        }
-        $newLines | Set-Content $iwanPath -Encoding UTF8
-    }
-
-    Write-Host "  Credentials updated, restarting panel..." -ForegroundColor Green
-
-    # Rotate log before restart
-    if (Test-Path $logPath) {
-        Move-Item -Path $logPath -Destination "$logPath.old" -Force -ErrorAction SilentlyContinue
-    }
-
-    Start-Process -FilePath "$INSTALL_DIR\panel.exe" -WorkingDirectory $INSTALL_DIR
-    return 0
-}
-
 $result = Test-PostInstallStatus
-while ($result -eq 1) {
-    $reply = Read-Host -Prompt "  AUTH REJECTED - re-enter credentials? (y/n)"
-    if ($reply -match '^[yY]') {
-        ReEnterCredentials
-        $result = Test-PostInstallStatus
-    } else {
-        break
-    }
-}
 
 Write-Host ""
 Write-Host "===========================================" -ForegroundColor Cyan
-if ($result -eq 0) {
+if ($result -eq 1) {
+    Write-Host "  AUTH REJECTED - check username/password" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  Edit config and restart:" -ForegroundColor Yellow
+    Write-Host "    notepad $INSTALL_DIR\iwan.conf"
+    Write-Host "    taskkill /f /im panel.exe"
+    Write-Host "    taskkill /f /im sdwan-windows-amd64.exe"
+    Write-Host "    Start-Process $INSTALL_DIR\panel.exe"
+} elseif ($result -eq 0) {
     Write-Host "  Install complete!" -ForegroundColor Green
 } else {
     Write-Host "  Install complete (tunnel may need attention)" -ForegroundColor Yellow
