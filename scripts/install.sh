@@ -203,15 +203,15 @@ download_binary() {
         local url="${entry% (*}"
         local label="${entry##*(}"
         label="${label%)}"
-        printf "  [%d/%d] %-20s ... " "$i" "$total" "$label"
-        if curl -fsSL --connect-timeout 5 --max-time 60 "$url" -o "$dest" 2>/dev/null; then
+        echo "  [${i}/${total}] ${label} ..."
+        if curl -fSL# --connect-timeout 5 --max-time 60 "$url" -o "$dest"; then
             local sz
             sz=$(du -h "$dest" | cut -f1)
-            echo -e "${G}✅ ${sz}${NC}"
+            echo -e "        ${G}✅ ${sz}${NC}"
             chmod +x "$dest"
             return 0
         else
-            echo -e "${Y}超时${NC}"
+            echo -e "        ${Y}超时${NC}"
         fi
     done
 
