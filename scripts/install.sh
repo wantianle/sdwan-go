@@ -198,6 +198,13 @@ bytes_human() {
     fi
 }
 
+clear_download_line() {
+    # Clear enough columns for the progress line before printing the final
+    # status. This avoids leftovers when the final line is shorter than the
+    # last `\r` progress frame.
+    printf "\r%120s\r" ""
+}
+
 # ────────────────────────────────────────────────────────────
 download_binary() {
     local binary="$1"
@@ -264,13 +271,15 @@ download_binary() {
                 local final_sz
                 final_sz=$(file_size "$dest" 2>/dev/null || echo 0)
                 human_cur=$(bytes_human "$final_sz")
-                printf "\r  [%d/%d] %-20s ... ${G}✅ %s${NC}\n" \
+                clear_download_line
+                printf "  [%d/%d] %-20s ... ${G}✅ %s${NC}\n" \
                     "$i" "$total" "$label" "$human_cur"
                 chmod +x "$dest"
                 return 0
             else
                 rm -f "$dest"
-                printf "\r  [%d/%d] %-20s ... ${Y}超时${NC}\n" \
+                clear_download_line
+                printf "  [%d/%d] %-20s ... ${Y}超时${NC}\n" \
                     "$i" "$total" "$label"
             fi
         else
