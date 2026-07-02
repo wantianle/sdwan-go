@@ -53,7 +53,12 @@ type Client struct {
 	reconnectStarted atomic.Bool
 	reconnecting     atomic.Bool
 	paused           atomic.Bool
-	switchMu         sync.Mutex // serializes SwitchServer calls
+	startupPending   atomic.Bool // true while initial tunnel connect hasn't succeeded
+	tunnelReady      atomic.Bool // true after TUN setup + Start() succeed
+	switchMu         sync.Mutex  // serializes SwitchServer calls
+	routeConflicts   []RouteConflict
+	tunCleanupMu     sync.Mutex
+	tunCleanupFn     func() // set by tryStartup on success, called by Close
 }
 
 // NewClient creates a new SDWAN client
@@ -80,6 +85,14 @@ func (c *Client) isStopped() bool {
 	stopped := c.stopped
 	c.mu.RUnlock()
 	return stopped
+}
+
+func (c *Client) setReady() {
+	c.tunnelReady.Store(true)
+}
+
+func (c *Client) clearReady() {
+	c.tunnelReady.Store(false)
 }
 
 // setSession atomically swaps the active session pointer and returns the
@@ -315,13 +328,13 @@ func (c *Client) Status() *controlapi.StatusResult {
 
 	sr := &controlapi.StatusResult{State: "disconnected"}
 
-	if c.session != nil && c.session.id != 0 {
+	if c.session != nil && c.session.id != 0 && c.tunnelReady.Load() {
 		sr.State = "running"
 		sr.SessionID = c.session.id
+	} else if c.startupPending.Load() || c.reconnecting.Load() {
+		sr.State = "reconnecting"
 	} else if c.paused.Load() {
 		sr.State = "paused"
-	} else if c.reconnecting.Load() {
-		sr.State = "reconnecting"
 	}
 
 	if c.config != nil {
@@ -338,6 +351,14 @@ func (c *Client) Status() *controlapi.StatusResult {
 
 	if c.TUN != nil {
 		sr.TUN = c.TUN.Name()
+	}
+
+	// Populate route conflicts
+	if len(c.routeConflicts) > 0 {
+		sr.RouteConflicts = make([]string, len(c.routeConflicts))
+		for i, rc := range c.routeConflicts {
+			sr.RouteConflicts[i] = fmt.Sprintf("%s:%s", rc.Interface, rc.LocalCIDR)
+		}
 	}
 
 	return sr
@@ -545,6 +566,20 @@ func (c *Client) Paused() bool {
 	return c.paused.Load()
 }
 
+// SetRouteConflicts stores the current route conflict snapshot.
+func (c *Client) SetRouteConflicts(conflicts []RouteConflict) {
+	c.mu.Lock()
+	c.routeConflicts = conflicts
+	c.mu.Unlock()
+}
+
+func (c *Client) getRouteConflicts() []RouteConflict {
+	c.mu.RLock()
+	conf := c.routeConflicts
+	c.mu.RUnlock()
+	return conf
+}
+
 func (c *Client) startReconnect() {
 	if !c.reconnectStarted.CompareAndSwap(false, true) {
 		return
@@ -716,6 +751,7 @@ func (c *Client) failSession(s *Session, reason error) {
 	wasCurrent := c.session == s
 	if wasCurrent {
 		c.session = nil
+		c.clearReady()
 	}
 	c.mu.Unlock()
 	log.Printf("[SESSION] Failing session %d: %v", s.id, reason)
@@ -862,6 +898,11 @@ func connectAndHandshakeSession(cfg *Config, localAddr *net.UDPAddr) (*Session, 
 // the existing session is left untouched.
 func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
 	c.paused.Store(false)
+
+	if c.startupPending.Load() {
+		return nil, fmt.Errorf("switch rejected: daemon is still starting, wait for running state")
+	}
+
 	if !c.switchMu.TryLock() {
 		return nil, fmt.Errorf("switch already in progress")
 	}
@@ -935,7 +976,11 @@ func (c *Client) SwitchServer(next *Config) (*OPENACKResult, error) {
 	// i) ensure TUN→server pump is running
 	c.startPacketPumpOnce()
 
+	// No conflicts after successful switch (routes get reapplied if needed)
+	c.SetRouteConflicts(nil)
+
 	log.Printf("[SWITCH] Switched to %s:%d session=%d", nextCfg.Server, nextCfg.Port, newS.id)
+	c.setReady()
 	return tunCfg, nil
 }
 
@@ -974,6 +1019,27 @@ func (c *Client) closeSession() {
 	}
 }
 
+// SetTUNCleanup stores a TUN/route cleanup function to be called during Close.
+// tryStartup calls this once the tunnel is fully established.
+//
+// Must be safe against racing Close(): if Close() already executed (isStopped),
+// the fn is called immediately and not stored (avoids double-cleanup).
+// The isStopped check is done atomically with the store under tunCleanupMu so
+// that Close() either sees the stored fn (and runs it) or does not see it
+// (because SetTUNCleanup already ran it).
+func (c *Client) SetTUNCleanup(fn func()) {
+	c.tunCleanupMu.Lock()
+	defer c.tunCleanupMu.Unlock()
+
+	if c.isStopped() {
+		if fn != nil {
+			fn()
+		}
+		return
+	}
+	c.tunCleanupFn = fn
+}
+
 // Close cleans up resources. Safe to call multiple times.
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
@@ -982,5 +1048,11 @@ func (c *Client) Close() {
 		c.mu.Unlock()
 		close(c.stopCh)
 		c.closeSession()
+
+		c.tunCleanupMu.Lock()
+		if c.tunCleanupFn != nil {
+			c.tunCleanupFn()
+		}
+		c.tunCleanupMu.Unlock()
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -112,6 +113,135 @@ type ControlOptions struct {
 	TokenFile string // optional path to a static token file
 }
 
+// tryStartup performs the full initial connect/handshake/TUN/Start sequence
+// with retry. Returns nil on success. Auth rejection stops retrying immediately.
+// Network, DNS, and other transient errors trigger backoff and retry.
+func tryStartup(client *Client, cfg *Config) {
+	client.startupPending.Store(true)
+	defer client.startupPending.Store(false)
+
+	backoff := 500 * time.Millisecond
+	for {
+		if client.isStopped() {
+			log.Println("[STARTUP] Client stopped, aborting startup")
+			return
+		}
+
+		log.Printf("[STARTUP] Attempting initial connect to %s:%d", cfg.Server, cfg.Port)
+
+		// 1. Connect UDP
+		if err := client.Connect(); err != nil {
+			log.Printf("[STARTUP] UDP connect failed: %v", err)
+			if isAuthRejection(err) {
+				log.Printf("[FATAL] Startup: auth rejected (not retrying)")
+				return
+			}
+			backoff = sleepWithBackoff(client, backoff, cfg)
+			continue
+		}
+		log.Printf("[INFO] UDP connected to %s:%d", cfg.Server, cfg.Port)
+
+		// 2. Handshake
+		log.Println("[AUTH] Waiting for OPENACK...")
+		openAck, err := client.Handshake()
+		if err != nil {
+			log.Printf("[STARTUP] Handshake failed: %v", err)
+			if isAuthRejection(err) {
+				log.Printf("[FATAL] Startup: auth rejected (not retrying)")
+				return
+			}
+			backoff = sleepWithBackoff(client, backoff, cfg)
+			continue
+		}
+		log.Println("[AUTH] Authenticated successfully")
+
+		// 3. Parse OPENACK
+		tunCfg := ParseOPENACK(openAck)
+		if tunCfg.LocalIP == "" || tunCfg.GatewayIP == "" {
+			log.Printf("[STARTUP] OPENACK missing IP info: local=%q gateway=%q", tunCfg.LocalIP, tunCfg.GatewayIP)
+			backoff = sleepWithBackoff(client, backoff, cfg)
+			continue
+		}
+		log.Printf("[TUN] Local IP=%s Gateway=%s DNS=%s MTU=%d", tunCfg.LocalIP, tunCfg.GatewayIP, tunCfg.DNSIP, tunCfg.MTU)
+
+		client.SetTunnelConfig(tunCfg)
+		if tunCfg.MTU > 0 {
+			cfg.MTU = int(tunCfg.MTU)
+		}
+
+		// 4. Setup TUN
+		tunName, tunCleanup, err := setupTUN(cfg, tunCfg, client)
+		if err != nil {
+			log.Printf("[STARTUP] TUN setup failed: %v", err)
+			client.TUN = nil // clear TUN on failure
+			// setupTUN already cleans up on failure
+			backoff = sleepWithBackoff(client, backoff, cfg)
+			continue
+		}
+		// Store cleanup so RunDaemon's deferred Close() tears down TUN + routes
+		client.SetTUNCleanup(tunCleanup)
+
+		log.Printf("[ROUTE] Added %s -> %s", cfg.RouteNet, tunName)
+
+		// 5. Start daemon loops
+		if err := client.Start(); err != nil {
+			log.Printf("[STARTUP] Daemon start failed: %v", err)
+			tunCleanup()     // tear down TUN/routes we just created
+			client.TUN = nil // clear TUN reference
+			backoff = sleepWithBackoff(client, backoff, cfg)
+			continue
+		}
+
+		log.Printf("[INFO] Tunnel established, starting daemon loops...")
+
+		client.setReady()
+
+		// Trigger the existing reconnect mechanism so future disconnects are handled
+		select {
+		case client.reconnectCh <- struct{}{}:
+		default:
+		}
+
+		// Show status
+		fmt.Println()
+		log.Println("[STATUS] SDWAN daemon running")
+		log.Printf("  Server:  %s:%d", cfg.Server, cfg.Port)
+		log.Printf("  User:    %s", cfg.Username)
+		log.Printf("  Session: %d", client.SessionID())
+		log.Printf("  TUN:     %s", tunName)
+		log.Printf("  Route:   %s -> %s", cfg.RouteNet, tunName)
+		fmt.Println()
+
+		// Success — stay in this state, reconnectLoop handles future failures
+		return
+	}
+}
+
+func isAuthRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "AUTH REJECTED") ||
+		strings.Contains(msg, "auth rejected") ||
+		strings.Contains(msg, "authentication failed")
+}
+
+func sleepWithBackoff(client *Client, backoff time.Duration, cfg *Config) time.Duration {
+	select {
+	case <-client.stopCh:
+		return backoff
+	case <-time.After(backoff):
+	}
+	if backoff < 8*time.Second {
+		backoff *= 2
+		if backoff > 8*time.Second {
+			backoff = 8 * time.Second
+		}
+	}
+	return backoff
+}
+
 // RunDaemon performs the same initial setup as RunOnce (config, UDP connect,
 // handshake, TUN, routes) but calls client.Start() instead of blocking on
 // client.Run(). It then waits for SIGINT/SIGTERM, cleans up, and returns.
@@ -135,50 +265,7 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 	}
 	defer client.Close()
 
-	// 3. Connect to server
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("UDP connect: %w", err)
-	}
-	log.Printf("[INFO] UDP connected to %s:%d", cfg.Server, cfg.Port)
-
-	// 4. Handshake
-	log.Println("[AUTH] Waiting for OPENACK...")
-	openAck, err := client.Handshake()
-	if err != nil {
-		return fmt.Errorf("handshake: %w", err)
-	}
-	log.Println("[AUTH] Authenticated successfully")
-
-	// Parse TUN configuration from OPENACK
-	tunCfg := ParseOPENACK(openAck)
-	if tunCfg.LocalIP == "" || tunCfg.GatewayIP == "" {
-		return fmt.Errorf("OPENACK missing IP info: local=%q gateway=%q",
-			tunCfg.LocalIP, tunCfg.GatewayIP)
-	}
-	log.Printf("[TUN] Local IP=%s Gateway=%s DNS=%s MTU=%d",
-		tunCfg.LocalIP, tunCfg.GatewayIP, tunCfg.DNSIP, tunCfg.MTU)
-
-	// Store baseline TUN config so SwitchServer can validate compatibility.
-	client.SetTunnelConfig(tunCfg)
-
-	// Override config MTU if server sent one
-	if tunCfg.MTU > 0 {
-		cfg.MTU = int(tunCfg.MTU)
-	}
-
-	// 5. Create TUN, assign IP, add route (with retry + cleanup wiring)
-	tunName, tunCleanup, err := setupTUN(cfg, tunCfg, client)
-	if err != nil {
-		return err
-	}
-	defer tunCleanup()
-
-	// 6. Start daemon loops (non-blocking via client.Start)
-	if err := client.Start(); err != nil {
-		return fmt.Errorf("daemon start: %w", err)
-	}
-
-	// 7. Load or generate control token
+	// 3. Load or generate control token
 	tokenFile := opts.TokenFile
 	if tokenFile == "" {
 		tokenFile = DefaultTokenPath(configPath)
@@ -188,7 +275,7 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 		return fmt.Errorf("control token: %w", err)
 	}
 
-	// 8. Start control API server
+	// 4. Start control API immediately (before tunnel is ready)
 	shutdownCh := make(chan struct{}, 1)
 	srv, err := startControlServer(opts.Addr, token, client, shutdownCh)
 	if err != nil {
@@ -200,23 +287,26 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 		_ = srv.Shutdown(ctx)
 	}()
 
-	// 9. Signal handling
+	log.Printf("[CTRL] Control API listening on %s (awaiting tunnel...)", opts.Addr)
+
+	// 5. Start tunnel in background goroutine
+	go tryStartup(client, cfg)
+
+	// 6. Signal handling
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	// 10. Show status
+	// 7. Show initial status
 	fmt.Println()
-	log.Println("[STATUS] SDWAN daemon running")
+	log.Println("[STATUS] SDWAN daemon starting")
 	log.Printf("  Control: %s  (token: %s)", opts.Addr, tokenFile)
-	log.Printf("  Server:  %s:%d", cfg.Server, cfg.Port)
+	log.Printf("  Target:  %s:%d", cfg.Server, cfg.Port)
 	log.Printf("  User:    %s", cfg.Username)
-	log.Printf("  Session: %d", client.SessionID())
-	log.Printf("  TUN:     %s", tunName)
-	log.Printf("  Route:   %s -> %s", cfg.RouteNet, tunName)
+	log.Println("  Status:  reconnecting...")
 	fmt.Println()
 
-	// 11. Wait for shutdown signal (SIGINT/SIGTERM or API shutdown)
+	// 8. Wait for shutdown signal (SIGINT/SIGTERM or API shutdown)
 	select {
 	case sig := <-sigCh:
 		log.Printf("[INFO] Received signal %v, shutting down...", sig)
@@ -245,6 +335,16 @@ func setupTUN(cfg *Config, tunCfg *OPENACKResult, client *Client) (tunName strin
 		return "", nil, fmt.Errorf("set TUN IP: %w", err)
 	}
 	log.Printf("[TUN] %s IP=%s/24 gateway=%s", tunName, tunCfg.LocalIP, tunCfg.GatewayIP)
+
+	// Check for route conflicts between SDWAN routenet and local LAN subnets
+	conflicts := detectRouteConflicts(cfg.RouteNet, tunName)
+	if len(conflicts) > 0 {
+		client.SetRouteConflicts(conflicts)
+		for _, c := range conflicts {
+			log.Printf("[ROUTE] WARNING: SDWAN route %s overlaps with local %s subnet %s — local traffic for %s will NOT go through VPN",
+				c.RouteNet, c.Interface, c.LocalCIDR, c.LocalCIDR)
+		}
+	}
 
 	routeGW := tunCfg.LocalIP
 	if err := AddRoute(cfg.RouteNet, tunName, routeGW); err != nil {
