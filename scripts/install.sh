@@ -172,13 +172,10 @@ probe_mtu() {
         if ping "${_ping_args[@]}" >/dev/null 2>&1; then
             best=$mid
             low=$(( mid + 1 ))
-            printf "." >&2
         else
             high=$(( mid - 1 ))
-            printf "," >&2
         fi
     done
-    echo "" >&2  # end the progress-dot line
 
     if [[ $best -eq 0 ]]; then
         echo -e "${Y}⚠️  MTU 探测未成功 — 使用默认值 1436（非致命警告）${NC}" >&2
@@ -467,7 +464,6 @@ verify_tunnel() {
             fi
         fi
     done
-    printf "\r%30s\r" ""  # clear the progress line
 
     # ── report results ──
     if [[ "$OS" == "linux" ]]; then
@@ -500,7 +496,11 @@ verify_tunnel() {
 
     # Auth
     if [[ $auth_rejected -eq 1 ]]; then
-        echo -e "  认证:     ${R}失败，用户名或密码错误 (AUTH REJECTED)${NC}"
+        echo ""
+        echo -e "  ${Y}━━━ AUTH REJECTED ━━━${NC}"
+        echo -e "  ${R}认证失败：用户名或密码错误，服务器拒绝了连接${NC}"
+        echo ""
+        echo -e "  ${B}请重新输入正确的账号密码${NC}"
         echo "──────────────────────────────────────"
         return 1
     elif [[ $established -eq 1 ]]; then
@@ -550,6 +550,13 @@ show_postinstall_help() {
 re_enter_credentials() {
     echo ""
     echo -e "${Y}━━━ 重新输入账号密码 ━━━${NC}"
+    local confirm="y"
+    read -rp "确认重新输入? (y/n, 直接回车=y): " confirm </dev/tty
+    [[ -z "$confirm" ]] && confirm="y"
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        echo -e "${Y}已取消，使用原有密码继续${NC}"
+        return 0
+    fi
     while true; do
         read -rp "👤 工号 (username): " USERNAME </dev/tty
         [[ -n "${USERNAME//[[:space:]]/}" ]] && break
@@ -614,6 +621,7 @@ main() {
     verify_tunnel
     local vresult=$?
     while [[ $vresult -eq 1 ]]; do
+        echo -e "${Y}AUTH REJECTED - 请重新输入正确的账号密码${NC}"
         re_enter_credentials
         verify_tunnel
         vresult=$?
