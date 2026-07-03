@@ -124,9 +124,7 @@ jobs:
 
       - name: Generate release notes
         run: |
-          # Fetch all tags so we can compute the previous tag
-          git fetch --tags
-          PREV_TAG=$(git tag --sort=-creatordate | grep -v "${{ github.ref_name }}" | head -1)
+          PREV_TAG=$(git tag --sort=-creatordate | grep -Fxv "${{ github.ref_name }}" | head -1)
           echo "Previous tag: $PREV_TAG"
           echo "# ${{ github.ref_name }}" > /tmp/release_body.md
           echo "" >> /tmp/release_body.md
