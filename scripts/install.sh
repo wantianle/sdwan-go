@@ -604,8 +604,12 @@ main() {
     esac
 
     # Verify tunnel; report results.
+    # set -e would kill the script when verify_tunnel returns non-zero,
+    # so we temporarily disable it to capture the result.
+    set +e
     verify_tunnel
     local vresult=$?
+    set -e
 
     if [[ $vresult -eq 1 ]]; then
         echo ""
