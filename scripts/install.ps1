@@ -267,6 +267,20 @@ function Probe-MTU {
     return $candidate
 }
 
+function Grant-ConfigAccess {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) { return }
+
+    $user = if ($env:USERDOMAIN) { "$($env:USERDOMAIN)\$($env:USERNAME)" } else { $env:USERNAME }
+    try {
+        & icacls.exe $Path /grant:r "$user`:(M)" | Out-Null
+        Write-Host "  Config writable for current user: $user" -ForegroundColor Green
+    } catch {
+        Write-Host "  Warning: could not grant config write access automatically" -ForegroundColor Yellow
+    }
+}
+
 # ────────────────────────────────────────────────────────────
 # 3. Server selection
 # ────────────────────────────────────────────────────────────
@@ -348,6 +362,8 @@ routenet=192.168.0.0/16
     Write-Host "  Config saved: $configPath" -ForegroundColor Green
 }
 
+Grant-ConfigAccess -Path $configPath
+
 # ────────────────────────────────────────────────────────────
 # 5. Auto-start & launch
 # ────────────────────────────────────────────────────────────
@@ -407,7 +423,6 @@ function Test-PostInstallStatus {
 
     for ($i = 0; $i -lt 15; $i++) {
         Start-Sleep -Seconds 1
-        Write-Host -NoNewline "`r  ... $i s / 15 s"
 
         # Scan logs ONLY for AUTH REJECTED — not for success
         if (-not $authRejected -and (Test-Path $logPath)) {
@@ -444,11 +459,9 @@ function Test-PostInstallStatus {
 
         # Stop waiting if iwan1 has IPv4 and route is present
         if ($sdwanIP -and $routeOK) {
-            Write-Host ""
             break
         }
     }
-    Write-Host "`r                              `r" -NoNewline  # clear progress line
 
     if ($sdwanIP) {
         Write-Host "  iwan1 IPv4: $sdwanIP" -ForegroundColor Green
@@ -496,7 +509,9 @@ if ($result -eq 1) {
     Write-Host "  AUTH REJECTED - check username/password" -ForegroundColor Red
     Write-Host ""
     Write-Host "  Edit config and restart:" -ForegroundColor Yellow
+    Write-Host "    Config file: $INSTALL_DIR\iwan.conf"
     Write-Host "    notepad $INSTALL_DIR\iwan.conf"
+    Write-Host "    (If access is still denied, reopen Notepad as Administrator)"
     Write-Host "    taskkill /f /im panel.exe"
     Write-Host "    taskkill /f /im sdwan-windows-amd64.exe"
     Write-Host "    Start-Process $INSTALL_DIR\panel.exe"
@@ -504,6 +519,14 @@ if ($result -eq 1) {
     Write-Host "  Install complete!" -ForegroundColor Green
 } else {
     Write-Host "  Install complete (tunnel may need attention)" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Check config/logs and restart:" -ForegroundColor Yellow
+    Write-Host "    Config file: $INSTALL_DIR\iwan.conf"
+    Write-Host "    notepad $INSTALL_DIR\iwan.conf"
+    Write-Host "    Get-Content $INSTALL_DIR\sdwan.log -Wait -Tail 20"
+    Write-Host "    taskkill /f /im panel.exe"
+    Write-Host "    taskkill /f /im sdwan-windows-amd64.exe"
+    Write-Host "    Start-Process $INSTALL_DIR\panel.exe"
 }
 Write-Host ""
 Write-Host "  Tray icon should appear shortly." -ForegroundColor White
