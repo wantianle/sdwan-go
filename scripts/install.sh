@@ -181,7 +181,7 @@ probe_mtu() {
     done
 
     if [[ $best -eq 0 ]]; then
-        echo -e "${Y}⚠️  MTU 探测未成功 — 使用默认值 1436（非致命警告）${NC}" >&2
+        echo -e "${Y}⚠️  MTU 探测未成功 — 使用默认值 1436${NC}" >&2
         echo "1436"
         return
     fi
