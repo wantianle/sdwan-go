@@ -120,16 +120,19 @@ select_server() {
     for node in "${nodes[@]}"; do
         IFS="|" read -r id desc addr <<< "$node"
         local lat
-        lat=$(ping -c 2 -W 2 "$addr" 2>/dev/null | awk -F '/' 'END {printf "%.0f", $5}')
-        local display="$lat" color="$G"
+        lat=$(ping -c 2 -W 2 "$addr" 2>/dev/null | awk -F '/' '/^rtt |^round-trip / {printf "%.0f", $5}')
+        local display color suffix="ms"
         if [[ -z "$lat" ]]; then
-            display="超时"; color="$R"
-        elif (( lat > 300 )); then
+            display="超时"; color="$R"; suffix=""
+        else
+            display="$lat"; color="$G"
+        fi
+        if [[ -n "$lat" ]] && (( lat > 300 )); then
             color="$R"
-        elif (( lat > 100 )); then
+        elif [[ -n "$lat" ]] && (( lat > 100 )); then
             color="$Y"
         fi
-        cache="${cache}${id}) | ${desc} | ${B}${addr}${NC} | ${color}${display}ms${NC}\\n"
+        cache="${cache}${id}) | ${desc} | ${B}${addr}${NC} | ${color}${display}${suffix}${NC}\\n"
     done
     echo -e "$cache" | column -t -s "|" >&2
     echo "----------------------------------------------" >&2
