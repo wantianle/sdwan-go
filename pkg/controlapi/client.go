@@ -2,11 +2,15 @@ package controlapi
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -28,6 +32,53 @@ func LoadControlToken(path string) (string, error) {
 	if token == "" {
 		return "", fmt.Errorf("token file %s is empty", path)
 	}
+	return token, nil
+}
+
+// LoadOrCreateControlToken ensures a token exists at path, creating it if
+// absent. It reads-and-returns an existing non-empty token; generates 32
+// random bytes, base64url-encodes them, creates the parent directory, and
+// writes the file mode 0600 when the file is missing.  On any error
+// (empty file, unreadable, unwritable, random read failure) it returns an
+// error without touching the filesystem.
+func LoadOrCreateControlToken(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("token file path is empty")
+	}
+
+	data, err := os.ReadFile(path)
+	if err == nil {
+		token := strings.TrimSpace(string(data))
+		if token == "" {
+			return "", fmt.Errorf("token file is empty: %s", path)
+		}
+		// Warn if permissions are more open than 0600
+		if fi, statErr := os.Stat(path); statErr == nil {
+			if fi.Mode().Perm()&0077 != 0 {
+				log.Printf("[API] WARNING: token file %s has permissions %04o, should be 0600", path, fi.Mode().Perm())
+			}
+		}
+		return token, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", fmt.Errorf("read token file: %w", err)
+	}
+
+	// Generate new token
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate token: %w", err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "", fmt.Errorf("create token dir: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(token+"\n"), 0600); err != nil {
+		return "", fmt.Errorf("write token file: %w", err)
+	}
+
+	log.Printf("[API] Generated control token at %s", path)
 	return token, nil
 }
 

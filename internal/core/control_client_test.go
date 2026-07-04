@@ -52,6 +52,72 @@ func TestLoadControlTokenEmptyPath(t *testing.T) {
 	}
 }
 
+func TestLoadOrCreateControlTokenGenerates(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "subdir", "control.token")
+	tok, err := controlapi.LoadOrCreateControlToken(f)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tok == "" {
+		t.Fatal("generated token is empty")
+	}
+	decoded, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(decoded)) != tok {
+		t.Fatalf("file contents %q != returned token %q", string(decoded), tok)
+	}
+	// Second call should read the same token from disk.
+	tok2, err := controlapi.LoadOrCreateControlToken(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok != tok2 {
+		t.Fatalf("second load returned different token")
+	}
+}
+
+func TestLoadOrCreateControlTokenExisting(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "control.token")
+	if err := os.WriteFile(f, []byte("my-new-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := controlapi.LoadOrCreateControlToken(f)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tok != "my-new-token" {
+		t.Fatalf("expected 'my-new-token', got %q", tok)
+	}
+}
+
+func TestLoadOrCreateControlTokenRejectsEmpty(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "control.token")
+	if err := os.WriteFile(f, []byte("\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlapi.LoadOrCreateControlToken(f); err == nil {
+		t.Fatal("expected error for empty token file, got nil")
+	}
+}
+
+func TestLoadOrCreateControlTokenEmptyPath(t *testing.T) {
+	_, err := controlapi.LoadOrCreateControlToken("")
+	if err == nil {
+		t.Fatal("expected error for empty path")
+	}
+}
+
+func TestLoadOrCreateControlTokenUnreadableDir(t *testing.T) {
+	// A path whose parent directory cannot be created (e.g. under /root)
+	// should return an error rather than panic.
+	_, err := controlapi.LoadOrCreateControlToken("/root/nonexistent/control.token")
+	if err == nil {
+		t.Fatal("expected error for unwritable parent path")
+	}
+}
+
 // ---------- controlapi.ControlStatus / controlapi.ControlSwitch against httptest ----------
 
 func TestControlClientStatusAuth(t *testing.T) {

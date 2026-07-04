@@ -88,7 +88,7 @@ func GetManager() *SdwanManager {
 			daemonPollStop: make(chan struct{}, 1),
 		}
 		// Generates token on first install so panel and daemon share one.
-		if tok, err := controlapi.LoadControlToken(m.tokenPath); err == nil {
+		if tok, err := controlapi.LoadOrCreateControlToken(m.tokenPath); err == nil {
 			m.token = tok
 		} else {
 			log.Printf("[PANEL] Token init failed: %v", err)
@@ -819,7 +819,7 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 	if alreadyStarted {
 		if token == "" {
 			var tokErr error
-			m.token, tokErr = controlapi.LoadControlToken(m.tokenPath)
+			m.token, tokErr = controlapi.LoadOrCreateControlToken(m.tokenPath)
 			if tokErr != nil {
 				log.Printf("[DAEMON] Token load failed on already-started poll: %v", tokErr)
 				return false
@@ -841,7 +841,7 @@ func (m *SdwanManager) ensureDaemonRunning() bool {
 	// so both panel and daemon share the same token. Without this
 	// pollDaemonReady below gets an empty token and silently fails.
 	var tokErr error
-	m.token, tokErr = controlapi.LoadControlToken(m.tokenPath)
+	m.token, tokErr = controlapi.LoadOrCreateControlToken(m.tokenPath)
 	if tokErr != nil {
 		log.Printf("[DAEMON] Token generation failed: %v", tokErr)
 		m.mu.Unlock()

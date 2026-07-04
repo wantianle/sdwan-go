@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	controlapi "sdwan-go/pkg/controlapi"
 	protocol "sdwan-go/pkg/protocol"
 )
 
@@ -264,7 +265,7 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 	if tokenFile == "" {
 		tokenFile = DefaultTokenPath(configPath)
 	}
-	token, err := loadOrGenerateToken(tokenFile)
+	token, err := controlapi.LoadOrCreateControlToken(tokenFile)
 	if err != nil {
 		return fmt.Errorf("control token: %w", err)
 	}

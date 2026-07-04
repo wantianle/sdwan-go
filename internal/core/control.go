@@ -2,15 +2,12 @@ package core
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,50 +15,6 @@ import (
 	controlapi "sdwan-go/pkg/controlapi"
 	protocol "sdwan-go/pkg/protocol"
 )
-
-// loadOrGenerateToken reads a bearer token from the file at tokenPath.
-// If the file does not exist it generates a 32-byte random token, base64url
-// encodes it, and writes it with mode 0600.
-func loadOrGenerateToken(tokenPath string) (string, error) {
-	if tokenPath == "" {
-		return "", fmt.Errorf("token file path is empty")
-	}
-
-	data, err := os.ReadFile(tokenPath)
-	if err == nil {
-		token := strings.TrimSpace(string(data))
-		if token == "" {
-			return "", fmt.Errorf("token file is empty: %s", tokenPath)
-		}
-		// Warn if permissions are more open than 0600
-		if fi, err := os.Stat(tokenPath); err == nil {
-			if fi.Mode().Perm()&0077 != 0 {
-				log.Printf("[CTRL] WARNING: token file %s has permissions %04o, should be 0600", tokenPath, fi.Mode().Perm())
-			}
-		}
-		return token, nil
-	}
-	if !os.IsNotExist(err) {
-		return "", fmt.Errorf("read token file: %w", err)
-	}
-
-	// Generate new token
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("generate token: %w", err)
-	}
-	token := base64.RawURLEncoding.EncodeToString(raw)
-
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
-		return "", fmt.Errorf("create token dir: %w", err)
-	}
-	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0600); err != nil {
-		return "", fmt.Errorf("write token file: %w", err)
-	}
-
-	log.Printf("[CTRL] Generated control token at %s", tokenPath)
-	return token, nil
-}
 
 // bearerAuth wraps next with Bearer token authentication. Requests that
 // match pathPrefix must carry a valid Authorization: Bearer <token> header.

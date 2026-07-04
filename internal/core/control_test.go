@@ -20,7 +20,7 @@ func TestLoadTokenExisting(t *testing.T) {
 	if err := os.WriteFile(f, []byte("my-test-token\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	tok, err := loadOrGenerateToken(f)
+	tok, err := controlapi.LoadOrCreateControlToken(f)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestLoadTokenExisting(t *testing.T) {
 
 func TestLoadTokenGeneratesNew(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "subdir", "control.token")
-	tok, err := loadOrGenerateToken(f)
+	tok, err := controlapi.LoadOrCreateControlToken(f)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestLoadTokenGeneratesNew(t *testing.T) {
 		t.Fatalf("file contents %q != returned token %q", string(decoded), tok)
 	}
 	// Second call should read the same token from disk.
-	tok2, err := loadOrGenerateToken(f)
+	tok2, err := controlapi.LoadOrCreateControlToken(f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestLoadTokenRejectsEmpty(t *testing.T) {
 	if err := os.WriteFile(f, []byte("\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadOrGenerateToken(f); err == nil {
+	if _, err := controlapi.LoadOrCreateControlToken(f); err == nil {
 		t.Fatal("expected error for empty token file, got nil")
 	}
 }
