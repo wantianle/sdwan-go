@@ -288,7 +288,10 @@ download_binary() {
         # ── discover total size via HEAD (follow redirects) ──
         local total_size=0 headers
         headers=$(curl -fsSLI --connect-timeout 5 --max-time 10 "$url" 2>/dev/null || true)
-        total_size=$(printf '%s\n' "$headers" | grep -i '^Content-Length:' | tail -1 | awk '{print $2}' | tr -d '\r')
+        # A proxy/redirect may omit Content-Length. With pipefail enabled,
+        # grep then returns 1; treat that as "no progress size available",
+        # not as a fatal installer error.
+        total_size=$(printf '%s\n' "$headers" | grep -i '^Content-Length:' | tail -1 | awk '{print $2}' | tr -d '\r' || true)
         if [[ -z "$total_size" ]] || ! [[ "$total_size" =~ ^[0-9]+$ ]] || (( total_size <= 0 )); then
             total_size=0
         fi
