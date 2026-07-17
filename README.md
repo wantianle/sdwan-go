@@ -102,9 +102,86 @@ routenet=192.168.0.0/16
 | `tunname` | | TUN 网卡名，默认 iwan1 |
 | `routenet` | | 内网路由网段，CIDR 格式 |
 
+## 日常管理
+
+安装脚本会把 Linux/macOS 配置成系统服务；Windows 由 `panel.exe`、托盘图标和后台 daemon 共同管理。修改配置后需要重启对应服务或面板才会生效。
+
+### Linux（systemd）
+
+```bash
+# 服务状态 / 启动 / 停止 / 重启
+sudo systemctl status sdwan
+sudo systemctl start sdwan
+sudo systemctl stop sdwan
+sudo systemctl restart sdwan
+
+# 设置或取消开机自启
+sudo systemctl enable sdwan
+sudo systemctl disable sdwan
+
+# 编辑配置并重启
+sudo vi /etc/sdwan/iwan.conf
+sudo systemctl restart sdwan
+
+# 实时日志 / 最近日志
+sudo journalctl -u sdwan -f
+sudo journalctl -u sdwan -n 50 --no-pager
+
+# 检查虚拟网卡、分配 IP 与内网路由
+ip -4 addr show iwan1
+ip route show 192.168.0.0/16
+```
+
+### macOS（launchd）
+
+```bash
+# 服务状态
+sudo launchctl list | grep com.minieye.sdwan
+
+# 重启服务（修改配置后使用）
+sudo launchctl kickstart -k system/com.minieye.sdwan
+
+# 停止/移除当前已加载的服务
+sudo launchctl bootout system /Library/LaunchDaemons/com.minieye.sdwan.plist
+
+# 重新加载服务（bootout 后或排错时使用）
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.minieye.sdwan.plist
+
+# 编辑配置并重启
+sudo vi /etc/sdwan/iwan.conf
+sudo launchctl kickstart -k system/com.minieye.sdwan
+
+# 实时日志 / 检查 utun 网卡与路由
+tail -f /var/log/sdwan.log
+ifconfig | grep -A4 '^utun'
+route -n get 192.168.0.0
+```
+
+### Windows（Panel / 托盘）
+
+在开始菜单运行 **SDWAN Panel**，或双击安装目录中的 `panel.exe`。托盘图标左键打开面板，右键可退出；退出会断开 SD-WAN 并清理虚拟网卡。
+
+```powershell
+# 配置和日志位置
+notepad C:\ProgramData\sdwan\iwan.conf
+Get-Content C:\ProgramData\sdwan\sdwan.log -Wait -Tail 30
+Get-Content C:\ProgramData\sdwan\panel.log -Tail 80
+
+# 配置修改后：完全退出旧进程，再启动面板
+taskkill /f /im panel.exe
+taskkill /f /im sdwan-windows-amd64.exe
+Start-Process C:\ProgramData\sdwan\panel.exe
+
+# 检查虚拟网卡、IP 与内网路由
+Get-NetIPAddress -InterfaceAlias iwan1 -AddressFamily IPv4
+Get-NetRoute -DestinationPrefix 192.168.0.0/16 | Where-Object InterfaceAlias -eq iwan1
+```
+
+> Windows 安装脚本会尝试授予当前用户 `C:\ProgramData\sdwan\iwan.conf` 的修改权限；若仍被公司策略拦截，请以管理员身份打开记事本后编辑该文件。
+
 ## CLI 子命令
 
-`sdwan -f iwan.conf` 启动 daemon 后，可用子命令控制：
+Linux/macOS 服务会以 `sdwan -daemon -f /etc/sdwan/iwan.conf` 启动后台 daemon。前台排错可直接运行 `sdwan -f /etc/sdwan/iwan.conf`；daemon 已运行时，可用子命令控制：
 
 ```bash
 # 查看当前状态（服务器、路由、session、冲突等）
