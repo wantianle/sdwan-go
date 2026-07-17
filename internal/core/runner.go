@@ -4,15 +4,21 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	controlapi "sdwan-go/pkg/controlapi"
 	protocol "sdwan-go/pkg/protocol"
 )
+
+// protocolIPv4Prefix is the protocol-compatibility /24 until the protocol
+// carries a prefix explicitly.
+const protocolIPv4Prefix = 24
 
 // RunOnce loads iwan.conf from configPath and runs the full one-shot SD-WAN
 // tunnel lifecycle: load config, connect UDP, handshake, create TUN, assign
@@ -184,7 +190,7 @@ func tryStartup(client *Client, cfg *Config) {
 		// 5. Start daemon loops
 		if err := client.Start(); err != nil {
 			log.Printf("[STARTUP] Daemon start failed: %v", err)
-			tunCleanup()     // tear down TUN/routes we just created
+			client.runTUNCleanup()
 			client.TUN = nil // clear TUN reference
 			backoff = sleepWithBackoff(client, backoff)
 			continue
@@ -242,10 +248,8 @@ func sleepWithBackoff(client *Client, backoff time.Duration) time.Duration {
 
 // RunDaemon performs the same initial setup as RunOnce (config, UDP connect,
 // handshake, TUN, routes) but calls client.Start() instead of blocking on
-// client.Run(). It then waits for SIGINT/SIGTERM, cleans up, and returns.
-//
-// The control API server is not implemented yet; the daemon simply stays
-// alive so future control clients can attach once the HTTP server is added.
+// client.Run(). It starts the localhost control API, then waits for
+// SIGINT/SIGTERM or an API shutdown request, cleans up, and returns.
 func RunDaemon(configPath string, opts ControlOptions) error {
 	// 1. Load config
 	cfg, err := LoadConfig(configPath)
@@ -312,50 +316,86 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 	return nil
 }
 
-// setupTUN creates the TUN adapter, assigns the server-assigned IP,
-// and adds the route with retry. Returns the adapter name and a cleanup
-// function that caller must defer (DelRoute + CloseTUN).
+type tunSetupOps struct {
+	create    func(string, int, string) (TunDevice, error)
+	setIP     func(string, string, string) error
+	addRoute  func(string, string, string) error
+	delRoute  func(string, string, string)
+	close     func(TunDevice, string)
+	conflicts func(string, string) []RouteConflict
+}
+
+// setupTUN creates and configures a TUN adapter, then transfers ownership of
+// the successfully added route and exact adapter through one idempotent cleanup.
 func setupTUN(cfg *Config, tunCfg *protocol.OPENACKResult, client *Client) (tunName string, cleanup func(), err error) {
-	localCIDR := tunCfg.LocalIP + "/24"
-	tun, err := CreateTUN(cfg.TUNName, cfg.MTU, localCIDR)
+	return setupTUNWithOps(cfg, tunCfg, client, tunSetupOps{
+		create: func(name string, mtu int, cidr string) (TunDevice, error) {
+			return CreateTUN(name, mtu, cidr)
+		},
+		setIP: SetTUNIP, addRoute: AddRoute, delRoute: DelRoute, close: CloseTUN, conflicts: detectRouteConflicts,
+	})
+}
+
+func setupTUNWithOps(cfg *Config, tunCfg *protocol.OPENACKResult, client *Client, ops tunSetupOps) (tunName string, cleanup func(), err error) {
+	localCIDR, err := tunnelLocalCIDR(tunCfg.LocalIP)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := validateTunnelGateway(tunCfg.GatewayIP); err != nil {
+		return "", nil, err
+	}
+	tun, err := ops.create(cfg.TUNName, cfg.MTU, localCIDR)
 	if err != nil {
 		return "", nil, fmt.Errorf("create TUN: %w", err)
 	}
-	client.TUN = tun
 	log.Printf("[TUN] Created %s (MTU=%d)", tun.Name(), cfg.MTU)
 
 	tunName = tun.Name()
-	if err := SetTUNIP(tunName, localCIDR, tunCfg.GatewayIP); err != nil {
-		CloseTUN(tun, cfg.TUNName)
+	if err := ops.setIP(tunName, localCIDR, tunCfg.GatewayIP); err != nil {
+		ops.close(tun, tunName)
 		return "", nil, fmt.Errorf("set TUN IP: %w", err)
 	}
 	log.Printf("[TUN] %s IP=%s/24 gateway=%s", tunName, tunCfg.LocalIP, tunCfg.GatewayIP)
 
-	// Check for route conflicts between SDWAN routenet and local LAN subnets
-	conflicts := detectRouteConflicts(cfg.RouteNet, tunName)
-	if len(conflicts) > 0 {
-		client.SetRouteConflicts(conflicts)
-		for _, c := range conflicts {
-			log.Printf("[ROUTE] WARNING: SDWAN route %s overlaps with local %s subnet %s — local traffic for %s will NOT go through VPN",
-				c.RouteNet, c.Interface, c.LocalCIDR, c.LocalCIDR)
-		}
+	var conflicts []RouteConflict
+	if ops.conflicts != nil {
+		conflicts = ops.conflicts(cfg.RouteNet, tunName)
 	}
 
 	routeGW := tunCfg.LocalIP
-	if err := AddRoute(cfg.RouteNet, tunName, routeGW); err != nil {
-		log.Printf("[WARN] Route add failed (may need to wait): %v", err)
-		time.Sleep(3 * time.Second)
-		if err := AddRoute(cfg.RouteNet, tunName, routeGW); err != nil {
-			DelRoute(cfg.RouteNet, tunName, routeGW)
-			CloseTUN(tun, cfg.TUNName)
-			return "", nil, fmt.Errorf("add route: %w", err)
-		}
+	if err := ops.addRoute(cfg.RouteNet, tunName, routeGW); err != nil {
+		ops.close(tun, tunName)
+		return "", nil, fmt.Errorf("add route: %w", err)
 	}
 	log.Printf("[ROUTE] Added %s -> %s", cfg.RouteNet, tunName)
 
+	// Commit only after the adapter and route are both fully configured.
+	client.TUN = tun
+	client.SetRouteConflicts(conflicts)
+	for _, c := range conflicts {
+		log.Printf("[ROUTE] WARNING: SDWAN route %s overlaps with local %s subnet %s — local traffic for %s will NOT go through VPN",
+			c.RouteNet, c.Interface, c.LocalCIDR, c.LocalCIDR)
+	}
+
+	var cleanupOnce sync.Once
 	cleanup = func() {
-		DelRoute(cfg.RouteNet, tunName, routeGW)
-		CloseTUN(tun, cfg.TUNName)
+		cleanupOnce.Do(func() { ops.delRoute(cfg.RouteNet, tunName, routeGW); ops.close(tun, tunName) })
 	}
 	return tunName, cleanup, nil
+}
+
+func tunnelLocalCIDR(local string) (string, error) {
+	addr, err := netip.ParseAddr(local)
+	if err != nil || !addr.Is4() || addr.IsUnspecified() {
+		return "", fmt.Errorf("invalid local IPv4 address: %s", local)
+	}
+	return netip.PrefixFrom(addr, protocolIPv4Prefix).String(), nil
+}
+
+func validateTunnelGateway(gateway string) error {
+	addr, err := netip.ParseAddr(gateway)
+	if err != nil || !addr.Is4() || addr.IsUnspecified() {
+		return fmt.Errorf("invalid gateway IPv4 address: %s", gateway)
+	}
+	return nil
 }

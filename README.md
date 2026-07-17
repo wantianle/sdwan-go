@@ -53,7 +53,7 @@ sdwan-go/
 
 **Linux / macOS：**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.sh | sudo bash
+curl --connect-timeout 10 --max-time 60 -fsSL https://gh.ddlc.top/https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.sh | sudo bash
 ```
 
 **Windows（管理员 PowerShell）：**
@@ -61,7 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/i
 iwr -useb https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/install.ps1 | iex
 ```
 
-> 直连 GitHub 失败时脚本会自动切换镜像（gh.ddlc.top → gh-proxy.com → gh.idayer.com）。
+> 上面的镜像只用于拉取安装脚本；脚本启动后会自动切换下载镜像（gh.ddlc.top → gh-proxy.com → gh.idayer.com）。若该镜像不可用，可把 `https://gh.ddlc.top/` 改为 `https://gh-proxy.com/` 或 `https://gh.idayer.com/`。`--connect-timeout 10 --max-time 60` 会避免外层 curl 无限等待。
 
 **安装指定版本：**
 ```bash
@@ -134,6 +134,11 @@ ip route show 192.168.0.0/16
 
 ### macOS（launchd）
 
+macOS 会动态分配本次 daemon 所拥有的 `utunN`（不应假定固定网卡名）。LaunchDaemon
+以 `-daemon` 运行，CLI/面板通过本机控制 API 管理它；API 的 shutdown 只停止进程，
+`KeepAlive` 会重新启动服务。要持续停止服务，请使用 `launchctl bootout`。服务 stderr
+日志为 `/var/log/sdwan.log`。
+
 ```bash
 # 服务状态
 sudo launchctl list | grep com.minieye.sdwan
@@ -141,8 +146,8 @@ sudo launchctl list | grep com.minieye.sdwan
 # 重启服务（修改配置后使用）
 sudo launchctl kickstart -k system/com.minieye.sdwan
 
-# 停止/移除当前已加载的服务
-sudo launchctl bootout system /Library/LaunchDaemons/com.minieye.sdwan.plist
+# 持续停止/移除当前已加载的服务（KeepAlive 服务不能仅靠 API shutdown 停止）
+sudo launchctl bootout system/com.minieye.sdwan
 
 # 重新加载服务（bootout 后或排错时使用）
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.minieye.sdwan.plist
@@ -185,10 +190,10 @@ Linux/macOS 服务会以 `sdwan -daemon -f /etc/sdwan/iwan.conf` 启动后台 da
 
 ```bash
 # 查看当前状态（服务器、路由、session、冲突等）
-sdwan status -f /etc/sdwan/iwan.conf
+sudo sdwan status -f /etc/sdwan/iwan.conf
 
 # 切换服务器
-sdwan switch minieye.8866.org -f /etc/sdwan/iwan.conf
+sudo sdwan switch minieye.8866.org -f /etc/sdwan/iwan.conf
 ```
 
 子命令通过读取同目录下的 `control.token` 与 daemon 的 HTTP API 通信。

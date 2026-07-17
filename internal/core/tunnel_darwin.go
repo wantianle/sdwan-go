@@ -4,49 +4,93 @@ package core
 
 import (
 	"fmt"
+	"log"
+	"net"
+	"net/netip"
 	"os/exec"
-	"strings"
 
 	"github.com/songgao/water"
 )
 
-// CreateTUN creates a TUN interface on macOS using the native utun kernel driver.
-// No external driver needed — utun is part of the Darwin kernel.
-func CreateTUN(name string, mtu int, _ string) (*water.Interface, error) {
+// darwinCommandRunner is intentionally local to the Darwin implementation so
+// command invocations can be tested without executing privileged commands.
+type darwinCommandRunner func(name string, args ...string) ([]byte, error)
+
+func runDarwinCommand(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
+}
+
+// darwinTUNIPArgs validates point-to-point IPv4 inputs and builds the
+// corresponding ifconfig arguments.
+func darwinTUNIPArgs(local, peer string) ([]string, error) {
+	localAddr, err := netip.ParseAddr(local)
+	if err != nil || !localAddr.Is4() || localAddr.IsUnspecified() {
+		return nil, fmt.Errorf("invalid local IPv4 address: %s", local)
+	}
+	peerAddr, err := netip.ParseAddr(peer)
+	if err != nil || !peerAddr.Is4() || peerAddr.IsUnspecified() {
+		return nil, fmt.Errorf("invalid peer IPv4 address: %s", peer)
+	}
+
+	return []string{"inet", localAddr.String(), peerAddr.String(), "netmask", darwinIPv4Netmask(), "up"}, nil
+}
+
+func darwinIPv4Netmask() string {
+	return net.IP(net.CIDRMask(protocolIPv4Prefix, 32)).String()
+}
+
+// darwinRouteAddArgs builds macOS's interface route invocation for Phase 1.
+func darwinRouteAddArgs(network, devName string) []string {
+	return []string{"-n", "add", "-net", network, "-interface", devName}
+}
+
+// CreateTUN creates a dynamically allocated native macOS utun interface.
+// Configured names are deliberately ignored: the actual iface.Name() is
+// authoritative on Darwin.
+func CreateTUN(_ string, mtu int, _ string) (*water.Interface, error) {
 	config := water.Config{
 		DeviceType: water.TUN,
 	}
-	config.Name = name
-
 	iface, err := water.New(config)
 	if err != nil {
 		return nil, fmt.Errorf("create utun: %w", err)
 	}
 
 	// Apply the requested MTU to the actual utun interface.
-	out, err := exec.Command("ifconfig", iface.Name(), "mtu", fmt.Sprintf("%d", mtu)).CombinedOutput()
-	if err != nil {
+	if err := setDarwinMTU(iface.Name(), mtu, runDarwinCommand); err != nil {
 		iface.Close()
-		return nil, fmt.Errorf("set MTU %d on %s: %w (output: %s)", mtu, iface.Name(), err, string(out))
+		return nil, err
 	}
 
 	return iface, nil
 }
 
-// SetTUNIP assigns an IP address to the utun interface and brings it up.
-// ip is in CIDR format, e.g. "10.100.100.7/24".
-func SetTUNIP(name, ip, gateway string) error {
-	// Parse CIDR: "10.100.100.7/24" -> IP + netmask
-	parts := strings.SplitN(ip, "/", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid CIDR: %s", ip)
+func setDarwinMTU(name string, mtu int, run darwinCommandRunner) error {
+	out, err := run("ifconfig", name, "mtu", fmt.Sprintf("%d", mtu))
+	if err != nil {
+		return fmt.Errorf("set MTU %d on %s: %w (output: %s)", mtu, name, err, string(out))
 	}
-	ipAddr := parts[0]
+	return nil
+}
 
-	cmd := exec.Command("ifconfig", name, "inet", ipAddr, ipAddr,
-		"netmask", "255.255.255.0", "up")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("set IP on %s: %w", name, err)
+// SetTUNIP assigns a protocol-compatible IPv4 address and point-to-point peer
+// to the utun interface, then brings it up.
+func SetTUNIP(name, ip, gateway string) error {
+	return setDarwinTUNIP(name, ip, gateway, runDarwinCommand)
+}
+
+func setDarwinTUNIP(name, ip, gateway string, run darwinCommandRunner) error {
+	prefix, err := netip.ParsePrefix(ip)
+	if err != nil || !prefix.Addr().Is4() || prefix.Addr().IsUnspecified() || prefix.Bits() != protocolIPv4Prefix {
+		return fmt.Errorf("invalid local IPv4 CIDR: %s", ip)
+	}
+	args, err := darwinTUNIPArgs(prefix.Addr().String(), gateway)
+	if err != nil {
+		return err
+	}
+	out, err := run("ifconfig", append([]string{name}, args...)...)
+	if err != nil {
+		return fmt.Errorf("set IP on %s: %w (output: %s)", name, err, string(out))
 	}
 	return nil
 }
@@ -54,12 +98,45 @@ func SetTUNIP(name, ip, gateway string) error {
 // AddRoute adds a static route via the utun interface.
 // gateway ignored on macOS (route goes through interface, not gateway).
 func AddRoute(network, devName, _ string) error {
-	return exec.Command("route", "-n", "add", "-net", network, "-interface", devName).Run()
+	return addDarwinRoute(network, devName, runDarwinCommand)
 }
 
-// DelRoute removes a static route.
+func addDarwinRoute(network, devName string, run darwinCommandRunner) error {
+	if _, err := darwinIPv4Route(network); err != nil {
+		return err
+	}
+	out, err := run("route", darwinRouteAddArgs(network, devName)...)
+	if err != nil {
+		return fmt.Errorf("add route %s: %w (output: %s)", network, err, string(out))
+	}
+	return nil
+}
+
+func darwinIPv4Route(network string) (netip.Prefix, error) {
+	prefix, err := netip.ParsePrefix(network)
+	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() {
+		return netip.Prefix{}, fmt.Errorf("invalid IPv4 route network: %s", network)
+	}
+	return prefix, nil
+}
+
+func deleteDarwinRoute(network, devName string, run darwinCommandRunner) error {
+	if _, err := darwinIPv4Route(network); err != nil {
+		return err
+	}
+	out, err := run("route", "-n", "delete", "-net", network, "-interface", devName)
+	if err != nil {
+		return fmt.Errorf("delete route %s: %w (output: %s)", network, err, string(out))
+	}
+	return nil
+}
+
+// DelRoute removes a static route. Cleanup is best-effort, but failures retain
+// command diagnostics in the process log.
 func DelRoute(network, devName, _ string) {
-	exec.Command("route", "-n", "delete", "-net", network, "-interface", devName).Run()
+	if err := deleteDarwinRoute(network, devName, runDarwinCommand); err != nil {
+		log.Printf("[WARN] Delete route failed: %v", err)
+	}
 }
 
 // CloseTUN closes the utun interface. macOS automatically cleans up

@@ -24,6 +24,7 @@ ROUTENET="192.168.0.0/16"
 DOWNLOAD_TMP=""
 MANIFEST_TMP=""
 SERVICE_JOURNAL_CURSOR=""
+MACOS_LOG_OFFSET=0
 
 G='\033[0;32m'; R='\033[0;31m'; Y='\033[0;33m'; B='\033[0;34m'; NC='\033[0m'
 
@@ -521,10 +522,44 @@ install_macos_service() {
     local label="com.minieye.sdwan"
     local plist_tmp
 
-    launchctl bootout "system/$label" 2>/dev/null || true
+    bootout_macos_job
+
+    # The daemon creates its control token here. Keep the containing directory
+    # root-owned before launch so token creation cannot inherit unsafe access.
+    mkdir -p "$CONFIG_DIR"
+    chown root:wheel "$CONFIG_DIR"
+    chmod 700 "$CONFIG_DIR"
+
+    # Preserve prior records and inspect only bytes appended after this point.
+    touch /var/log/sdwan.log
+    MACOS_LOG_OFFSET=$(file_size /var/log/sdwan.log)
 
     plist_tmp=$(mktemp "/Library/LaunchDaemons/.${label}.XXXXXX")
-    cat > "$plist_tmp" <<EOF
+    write_macos_plist "$plist_tmp"
+
+    chown root:wheel "$plist_tmp"
+    chmod 644 "$plist_tmp"
+    plutil -lint "$plist_tmp" >/dev/null
+    mv -f "$plist_tmp" "$plist"
+
+    launchctl bootstrap system "$plist"
+    launchctl print "system/$label" >/dev/null
+    echo -e "${G}✅ LaunchDaemon 已安装并启动${NC}"
+}
+
+# A loaded old job must be gone before replacing its executable or plist.
+bootout_macos_job() {
+    local label="com.minieye.sdwan"
+    launchctl bootout "system/$label" 2>/dev/null || true
+    if launchctl print "system/$label" >/dev/null 2>&1; then
+        echo -e "${R}❌ 旧 LaunchDaemon 仍在运行；拒绝替换二进制或 plist${NC}" >&2
+        return 1
+    fi
+}
+
+write_macos_plist() {
+    local destination="$1"
+    cat > "$destination" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -535,6 +570,7 @@ install_macos_service() {
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/sdwan</string>
+        <string>-daemon</string>
         <string>-f</string>
         <string>/etc/sdwan/iwan.conf</string>
     </array>
@@ -542,30 +578,20 @@ install_macos_service() {
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <key>StandardOutPath</key>
-    <string>/var/log/sdwan.log</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
     <key>StandardErrorPath</key>
     <string>/var/log/sdwan.log</string>
 </dict>
 </plist>
 EOF
-
-    chown root:wheel "$plist_tmp"
-    chmod 644 "$plist_tmp"
-    plutil -lint "$plist_tmp" >/dev/null
-    mv -f "$plist_tmp" "$plist"
-
-    # Truncate log before starting to avoid stale-log poisoning
-    : > /var/log/sdwan.log 2>/dev/null || true
-    launchctl bootstrap system "$plist"
-    launchctl print "system/$label" >/dev/null
-    echo -e "${G}✅ LaunchDaemon 已安装并启动${NC}"
 }
 
 # ────────────────────────────────────────────────────────────
 # auth_rejected_current_attempt checks the service logs for an
 # AUTH REJECTED marker from the current attempt. Linux queries only records
-# after the pre-restart journal cursor; macOS truncates its log before launch.
+# after the pre-restart journal cursor; macOS reads only bytes appended after
+# the pre-bootstrap log boundary.
 # Returns 0 if found, 1 otherwise.
 auth_rejected_current_attempt() {
     local logs=""
@@ -575,7 +601,7 @@ auth_rejected_current_attempt() {
         [[ -n "$SERVICE_JOURNAL_CURSOR" ]] || return 1
         logs=$(journalctl -u sdwan --after-cursor "$SERVICE_JOURNAL_CURSOR" --no-pager 2>/dev/null || true)
     else
-        logs=$(awk '1' /var/log/sdwan.log 2>/dev/null || true)
+        logs=$(tail -c "+$((MACOS_LOG_OFFSET + 1))" /var/log/sdwan.log 2>/dev/null || true)
     fi
     printf '%s\n' "$logs" | awk 'BEGIN { found=0 } tolower($0) ~ /auth rejected/ { found=1 } END { exit !found }'
 }
@@ -754,6 +780,13 @@ main() {
     check_controlling_tty
     detect_platform
 
+    # Prove the old service is gone before download_binary atomically replaces
+    # the installed executable. install_macos_service repeats this before the
+    # plist is replaced and bootstrapped.
+    if [[ "$OS" == "darwin" ]]; then
+        bootout_macos_job
+    fi
+
     # Download binary first — if this fails, no point configuring
     download_binary "$BINARY"
 
@@ -818,4 +851,6 @@ main() {
     fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

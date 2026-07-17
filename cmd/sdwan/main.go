@@ -46,7 +46,7 @@ func main() {
 
 	// Legacy mode: -f, -daemon, -version flags via flag.Parse
 	configPath := flag.String("f", defaultConfigPath, "config file path")
-	daemon := flag.Bool("daemon", false, "run as daemon (non-blocking, future control API)")
+	daemon := flag.Bool("daemon", false, "run as daemon with control API")
 	controlAddr := flag.String("control", defaultControlAddr, "control API listen address (daemon mode only)")
 	tokenFile := flag.String("token-file", "", "path to static token file (daemon mode only)")
 	showVersion := flag.Bool("version", false, "show version and exit")
@@ -62,12 +62,14 @@ func main() {
 
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	// Write log to sdwan.log (in addition to stderr) so errors are
-	// captured even if the console window closes immediately on Windows.
-	logFile, err := os.Create("sdwan.log")
-	if err == nil {
-		defer logFile.Close()
-		log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+	// Services on Unix write only to stderr, which is owned by systemd or
+	// launchd. Keep the Windows file for the panel/installer workflow.
+	if fileLoggingEnabled(runtime.GOOS) {
+		logFile, err := os.Create("sdwan.log")
+		if err == nil {
+			defer logFile.Close()
+			log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+		}
 	}
 
 	log.Printf("[INFO] SDWAN Go client starting, config=%s", *configPath)
@@ -89,6 +91,10 @@ func main() {
 	if err := core.RunOnce(*configPath); err != nil {
 		log.Fatalf("[FATAL] %v", err)
 	}
+}
+
+func fileLoggingEnabled(goos string) bool {
+	return goos == "windows"
 }
 
 func resolveToken(configPath, tokenFile string) (string, error) {

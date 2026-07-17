@@ -1001,15 +1001,26 @@ func (c *Client) closeSession() {
 // (because SetTUNCleanup already ran it).
 func (c *Client) SetTUNCleanup(fn func()) {
 	c.tunCleanupMu.Lock()
-	defer c.tunCleanupMu.Unlock()
-
-	if c.isStopped() {
-		if fn != nil {
-			fn()
-		}
-		return
+	stopped := c.isStopped()
+	if !stopped {
+		c.tunCleanupFn = fn
 	}
-	c.tunCleanupFn = fn
+	c.tunCleanupMu.Unlock()
+	if stopped && fn != nil {
+		fn()
+	}
+}
+
+// runTUNCleanup takes and clears the registered cleanup before invoking it so
+// external route/device operations never run while tunCleanupMu is held.
+func (c *Client) runTUNCleanup() {
+	c.tunCleanupMu.Lock()
+	fn := c.tunCleanupFn
+	c.tunCleanupFn = nil
+	c.tunCleanupMu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // Close cleans up resources. Safe to call multiple times.
@@ -1021,10 +1032,6 @@ func (c *Client) Close() {
 		close(c.stopCh)
 		c.closeSession()
 
-		c.tunCleanupMu.Lock()
-		if c.tunCleanupFn != nil {
-			c.tunCleanupFn()
-		}
-		c.tunCleanupMu.Unlock()
+		c.runTUNCleanup()
 	})
 }
