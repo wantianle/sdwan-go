@@ -39,6 +39,9 @@ jobs:
           - os: linux
             arch: amd64
             ext: ""
+          - os: linux
+            arch: arm64
+            ext: ""
           - os: darwin
             arch: amd64
             ext: ""
@@ -61,6 +64,7 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "0"
         run: |
+          mkdir -p dist
           cd cmd/sdwan
           go build -ldflags="-s -w -X 'main.Version=${{ github.ref_name }}' -X 'main.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%S%z')'" -o "../../dist/sdwan-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}" .
           cd ../..
@@ -93,7 +97,7 @@ jobs:
           GOARCH: amd64
           CGO_ENABLED: "0"
         working-directory: panel
-        run: go build -tags production -ldflags="-s -w -H windowsgui" -o ../dist/panel.exe .
+        run: mkdir -p ../dist && go build -tags production -ldflags="-s -w -H windowsgui" -o ../dist/panel.exe .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -118,6 +122,9 @@ jobs:
 
       - name: Bundle wintun.dll
         run: cp wintun.dll dist/
+
+      - name: Generate SHA-256 checksums
+        run: sha256sum dist/* > dist/SHA256SUMS
 
       - name: List artifacts
         run: ls -lh dist/

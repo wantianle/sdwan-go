@@ -28,9 +28,13 @@ case "$OS" in
         echo -e "${G}✅ systemd 服务已移除${NC}"
         ;;
     darwin)
-        launchctl bootout system /Library/LaunchDaemons/com.minieye.sdwan.plist 2>/dev/null || \
-            launchctl unload /Library/LaunchDaemons/com.minieye.sdwan.plist 2>/dev/null || true
+        launchctl bootout system/com.minieye.sdwan 2>/dev/null || true
         rm -f /Library/LaunchDaemons/com.minieye.sdwan.plist
+        rm -f /var/log/sdwan.log
+        for log_file in /var/log/sdwan.log.*; do
+            [[ -e "$log_file" || -L "$log_file" ]] || continue
+            [[ -f "$log_file" || -L "$log_file" ]] && rm -f "$log_file"
+        done
         echo -e "${G}✅ LaunchDaemon 已移除${NC}"
         ;;
 esac
