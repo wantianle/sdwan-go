@@ -11,14 +11,17 @@ Go 实现的 SD-WAN VPN 隧道客户端，跨平台支持。
 ## 架构
 
 ```
-panel (Wails) / CLI  ──HTTP──▶  sdwan daemon  ──UDP──▶  SD-WAN server
-                                    │
-                                    ├─ TUN/Wintun/utun
-                                    ├─ IP + 路由
-                                    └─ 控制 API (:17890)
+Windows panel  ──HTTP──▶  sdwan daemon  ──UDP──▶  SD-WAN server
+Linux/macOS service ───▶  sdwan foreground ──UDP──▶ SD-WAN server
+                                  │
+                                  ├─ TUN/Wintun/utun
+                                  └─ IP + 路由
 ```
 
-核心进程以 **daemon 模式** 运行，拥有 TUN 网卡、IP 和路由的生命周期。面板和 CLI 通过 localhost HTTP 控制 API 与之通信，不直接操作网卡或路由。daemon 启动失败时不退出，后台自动重连（指数退避 500ms~8s），auth 拒绝时永久停止。
+Windows 面板通过 localhost 控制 API 管理 daemon。Linux 和 macOS 由 systemd/launchd
+以前台模式运行 `sdwan -f /etc/sdwan/iwan.conf`，由服务管理器负责重启。核心进程拥有
+TUN 网卡、IP 和路由的生命周期；启动失败时会后台自动重连（指数退避 500ms~8s），auth
+拒绝时永久停止。
 
 ## 目录结构
 
@@ -134,10 +137,9 @@ ip route show 192.168.0.0/16
 
 ### macOS（launchd）
 
-macOS 会动态分配本次 daemon 所拥有的 `utunN`（不应假定固定网卡名）。LaunchDaemon
-以 `-daemon` 运行，CLI/面板通过本机控制 API 管理它；API 的 shutdown 只停止进程，
-`KeepAlive` 会重新启动服务。要持续停止服务，请使用 `launchctl bootout`。服务 stderr
-日志为 `/var/log/sdwan.log`。
+macOS 会动态分配本次服务进程所拥有的 `utunN`（不应假定固定网卡名）。LaunchDaemon
+以 `sdwan -f /etc/sdwan/iwan.conf` 前台运行，并由 `KeepAlive` 负责重启。要持续停止服务，
+请使用 `launchctl bootout`。服务 stderr 日志为 `/var/log/sdwan.log`。
 
 ```bash
 # 服务状态
@@ -146,7 +148,7 @@ sudo launchctl list | grep com.minieye.sdwan
 # 重启服务（修改配置后使用）
 sudo launchctl kickstart -k system/com.minieye.sdwan
 
-# 持续停止/移除当前已加载的服务（KeepAlive 服务不能仅靠 API shutdown 停止）
+# 持续停止/移除当前已加载的服务
 sudo launchctl bootout system/com.minieye.sdwan
 
 # 重新加载服务（bootout 后或排错时使用）
@@ -186,7 +188,8 @@ Get-NetRoute -DestinationPrefix 192.168.0.0/16 | Where-Object InterfaceAlias -eq
 
 ## CLI 子命令
 
-Linux/macOS 服务会以 `sdwan -daemon -f /etc/sdwan/iwan.conf` 启动后台 daemon。前台排错可直接运行 `sdwan -f /etc/sdwan/iwan.conf`；daemon 已运行时，可用子命令控制：
+Windows 面板启动后台 daemon 后，可用 CLI 子命令通过控制 API 查询状态或切换服务器。
+Linux/macOS 服务以前台模式运行，不提供 daemon 控制 API。
 
 ```bash
 # 查看当前状态（服务器、路由、session、冲突等）
@@ -196,11 +199,11 @@ sudo sdwan status -f /etc/sdwan/iwan.conf
 sudo sdwan switch minieye.8866.org -f /etc/sdwan/iwan.conf
 ```
 
-子命令通过读取同目录下的 `control.token` 与 daemon 的 HTTP API 通信。
+Windows 子命令通过读取同目录下的 `control.token` 与 daemon 的 HTTP API 通信。
 
 ## 控制 API (HTTP)
 
-daemon 在 `127.0.0.1:17890` 提供 REST API，Bearer token 鉴权（token 文件与 daemon 同目录的 `control.token`）。
+Windows daemon 在 `127.0.0.1:17890` 提供 REST API，Bearer token 鉴权（token 文件与 daemon 同目录的 `control.token`）。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|

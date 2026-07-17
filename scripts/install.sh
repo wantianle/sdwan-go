@@ -570,7 +570,6 @@ write_macos_plist() {
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/sdwan</string>
-        <string>-daemon</string>
         <string>-f</string>
         <string>/etc/sdwan/iwan.conf</string>
     </array>
@@ -578,8 +577,6 @@ write_macos_plist() {
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <key>ThrottleInterval</key>
-    <integer>10</integer>
     <key>StandardErrorPath</key>
     <string>/var/log/sdwan.log</string>
 </dict>
