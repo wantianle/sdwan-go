@@ -120,7 +120,12 @@ select_server() {
     for node in "${nodes[@]}"; do
         IFS="|" read -r id desc addr <<< "$node"
         local lat
-        lat=$(ping -c 2 -W 2 "$addr" 2>/dev/null | awk -F '/' '/^rtt |^round-trip / {printf "%.0f", $5}')
+        local -a ping_args=(-c 2)
+        case "$OS" in
+            linux)  ping_args+=(-W 2) ;;    # seconds
+            darwin) ping_args+=(-W 2000) ;; # milliseconds
+        esac
+        lat=$(ping "${ping_args[@]}" "$addr" 2>/dev/null | awk -F '/' '/^rtt |^round-trip / {printf "%.0f", $5}')
         local display color suffix="ms"
         if [[ -z "$lat" ]]; then
             display="超时"; color="$R"; suffix=""
