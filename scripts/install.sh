@@ -15,7 +15,7 @@ REPO_OWNER="wantianle"
 REPO_NAME="sdwan-go"
 REPO_BRANCH="master"
 GH_PROXIES=("https://gh.ddlc.top/" "https://gh-proxy.com/" "https://gh.idayer.com/")  # GitHub mirrors (verified working 2025-06-29)
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 CONFIG_DIR="/etc/sdwan"
 CONFIG_FILE="$CONFIG_DIR/iwan.conf"
 VERSION="latest"
@@ -23,6 +23,7 @@ TEST_HOST="${TEST_HOST:-hfs.minieye.tech}"
 ROUTENET="192.168.0.0/16"
 DOWNLOAD_TMP=""
 MANIFEST_TMP=""
+LOCAL_DIR=""
 SERVICE_JOURNAL_CURSOR=""
 MACOS_LOG_OFFSET=0
 
@@ -35,12 +36,14 @@ Usage: sudo bash install.sh [options]
 
 Options:
   -v, --version VERSION   Install a specific GitHub release tag (default: latest)
+      --local-dir DIR     Install the prebuilt binary from DIR instead of downloading it
   -h, --help              Show this help
 
 Examples:
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/scripts/install.sh | sudo bash
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/scripts/install.sh | sudo bash -s -- 1.0.29
   curl -fsSL https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}/scripts/install.sh | sudo bash -s -- -v v1.0.29
+  sudo bash scripts/install.sh --local-dir ./dist
 EOF
 }
 
@@ -50,6 +53,11 @@ parse_args() {
             -v|--version)
                 [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 1; }
                 VERSION="$2"
+                shift 2
+                ;;
+            --local-dir)
+                [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 1; }
+                LOCAL_DIR="$2"
                 shift 2
                 ;;
             -h|--help)
@@ -481,6 +489,166 @@ download_binary() {
 }
 
 # ────────────────────────────────────────────────────────────
+# manifest_record_hashes prints one "ok <hash>" or "bad <reason>"
+# line for every SHA256SUMS line that names the requested
+# artifact. A line counts as naming the artifact when any of its
+# whitespace-separated tokens, after stripping an optional leading
+# "*" and an optional "dist/" prefix, equals the artifact name.
+#
+# Such a line is only a VALID record when the whole line is
+# exactly two whitespace-separated fields:
+#     <64-hex hash> <name>      (name may carry "*" and/or "dist/")
+# Anything else — a trailing extra token, a missing filename, a
+# missing or non-hex hash, reversed field order — is reported as
+# "bad" with a reason so the caller must refuse the manifest
+# instead of silently ignoring the record.
+#
+# One terminal CR is stripped first so CRLF manifests validate
+# identically; that also keeps a CRLF duplicate of the artifact
+# visible to the caller's uniqueness check.
+manifest_record_hashes() {
+    local manifest="$1"
+    local artifact="$2"
+    awk -v artifact="$artifact" '
+        {
+            sub(/\r$/, "", $0)      # exactly one terminal CR (CRLF manifest)
+            if (NF == 0) { next }   # blank line
+
+            names_artifact = 0
+            for (i = 1; i <= NF; i++) {
+                token = $i
+                sub(/^\*/, "", token)
+                sub(/^dist\//, "", token)
+                if (token == artifact) { names_artifact = 1; break }
+            }
+            if (!names_artifact) { next }
+
+            if (NF != 2) { print "bad field-count"; next }
+            if ($1 !~ /^[0-9a-fA-F]+$/ || length($1) != 64) { print "bad hash"; next }
+
+            second = $2
+            sub(/^\*/, "", second)
+            sub(/^dist\//, "", second)
+            if (second != artifact) { print "bad field-order"; next }
+
+            print "ok " tolower($1)
+        }
+    ' "$manifest"
+}
+
+# ────────────────────────────────────────────────────────────
+# install_from_local installs a prebuilt binary from a local
+# directory (e.g. ./dist) without downloading it. If that
+# directory carries a SHA256SUMS manifest, the manifest is
+# authoritative: exactly one valid record for the chosen artifact
+# is required. Only when SHA256SUMS is entirely absent is the
+# local build treated as trusted, with a single notice.
+#
+# The bytes that get verified are the bytes that get installed:
+# the source is copied into a temp file inside $INSTALL_DIR, the
+# sha256 is computed on that temp file (never on the source
+# path), and only then is the temp file renamed into place. A
+# symlinked source is refused so the verified content cannot be
+# swapped between hashing and install.
+install_from_local() {
+    if [[ ! -d "$LOCAL_DIR" ]]; then
+        echo -e "${R}❌ 本地产物目录不存在: $LOCAL_DIR${NC}" >&2
+        exit 1
+    fi
+
+    # Accept the artifact name the installer expects, plus the name the release
+    # build actually produces (dist/ uses "macos" for darwin).
+    local -a candidates=("$BINARY")
+    case "$OS" in
+        darwin) candidates+=("sdwan-macos-${ARCH}") ;;
+    esac
+
+    local source="" candidate rejected_link=""
+    for candidate in "${candidates[@]}"; do
+        if [[ -L "$LOCAL_DIR/$candidate" ]]; then
+            [[ -z "$rejected_link" ]] && rejected_link="$LOCAL_DIR/$candidate"
+            continue
+        fi
+        if [[ -f "$LOCAL_DIR/$candidate" ]]; then
+            source="$LOCAL_DIR/$candidate"
+            break
+        fi
+    done
+    if [[ -z "$source" && -n "$rejected_link" ]]; then
+        echo -e "${R}❌ 拒绝安装符号链接本地产物: ${rejected_link}${NC}" >&2
+        echo "   请提供真实文件（符号链接可能在安装过程中被替换）" >&2
+        exit 1
+    fi
+    if [[ -z "$source" ]]; then
+        echo -e "${R}❌ 在 $LOCAL_DIR 中找不到可安装的产物${NC}" >&2
+        echo "   期望以下文件之一: ${candidates[*]}" >&2
+        exit 1
+    fi
+
+    local name expected="" record_count=0 kind detail reason
+    name="${source##*/}"
+    if [[ -f "$LOCAL_DIR/SHA256SUMS" ]]; then
+        while read -r kind detail; do
+            if [[ "$kind" != "ok" ]]; then
+                case "$detail" in
+                    field-count) reason="记录必须恰好两个字段: <64位哈希> <文件名>（文件名后不得有多余内容，也不能缺少文件名）" ;;
+                    hash)        reason="哈希字段不是 64 位十六进制" ;;
+                    field-order) reason="字段顺序错误，哈希必须在前、文件名在后" ;;
+                    *)           reason="记录格式无效" ;;
+                esac
+                echo -e "${R}❌ SHA256SUMS 中 ${name} 的校验和格式无效: ${reason}${NC}" >&2
+                exit 1
+            fi
+            record_count=$(( record_count + 1 ))
+            expected="$detail"
+        done < <(manifest_record_hashes "$LOCAL_DIR/SHA256SUMS" "$name")
+        if [[ $record_count -eq 0 ]]; then
+            echo -e "${R}❌ SHA256SUMS 中找不到 ${name} 的校验和记录${NC}" >&2
+            echo "   SHA256SUMS 存在时其记录即为权威: 请补充 ${name} 的记录，或移走该文件" >&2
+            exit 1
+        fi
+        if [[ $record_count -gt 1 ]]; then
+            echo -e "${R}❌ SHA256SUMS 中 ${name} 有 ${record_count} 条记录，无法确定唯一校验和${NC}" >&2
+            exit 1
+        fi
+    fi
+
+    mkdir -p "$INSTALL_DIR"
+    local dest="$INSTALL_DIR/sdwan"
+    DOWNLOAD_TMP=$(mktemp "$INSTALL_DIR/.sdwan.XXXXXX")
+    if ! cp -f "$source" "$DOWNLOAD_TMP"; then
+        rm -f "$DOWNLOAD_TMP"
+        DOWNLOAD_TMP=""
+        echo -e "${R}❌ 复制本地产物失败: $source${NC}" >&2
+        exit 1
+    fi
+
+    # Hash the staged copy, never the source path: from here on the verified
+    # bytes are exactly the bytes that will be renamed into place. Without a
+    # manifest there is nothing to compare against, so no hash is taken.
+    if [[ -n "$expected" ]]; then
+        local copied_hash
+        copied_hash=$(sha256_file "$DOWNLOAD_TMP")
+        if [[ "$copied_hash" != "$expected" ]]; then
+            rm -f "$DOWNLOAD_TMP"
+            DOWNLOAD_TMP=""
+            echo -e "${R}❌ 校验和不匹配: $name${NC}" >&2
+            echo "   期望: $expected" >&2
+            echo "   实际: $copied_hash" >&2
+            exit 1
+        fi
+        echo -e "  ${G}✅ SHA256SUMS 校验通过: $name${NC}"
+    else
+        echo -e "${Y}[local] 本地不存在 SHA256SUMS，跳过完整性校验（本地产物按可信处理）${NC}"
+    fi
+
+    chmod 755 "$DOWNLOAD_TMP"
+    mv -f "$DOWNLOAD_TMP" "$dest"
+    DOWNLOAD_TMP=""
+    echo -e "${G}✅ [local] 已安装: $source → $dest${NC}"
+}
+
+# ────────────────────────────────────────────────────────────
 install_linux_service() {
     local service_file="/etc/systemd/system/sdwan.service"
 
@@ -784,8 +952,12 @@ main() {
         bootout_macos_job
     fi
 
-    # Download binary first — if this fails, no point configuring
-    download_binary "$BINARY"
+    # Obtain the binary first — if this fails, no point configuring
+    if [[ -n "$LOCAL_DIR" ]]; then
+        install_from_local
+    else
+        download_binary "$BINARY"
+    fi
 
     SERVER=$(select_server)
     echo -e "${G}✅ 服务器: $SERVER${NC}"

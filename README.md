@@ -66,6 +66,25 @@ iwr -useb https://raw.githubusercontent.com/wantianle/sdwan-go/master/scripts/in
 
 > 上面的镜像只用于拉取安装脚本；脚本启动后会自动切换下载镜像（gh.ddlc.top → gh-proxy.com → gh.idayer.com）。若该镜像不可用，可把 `https://gh.ddlc.top/` 改为 `https://gh-proxy.com/` 或 `https://gh.idayer.com/`。`--connect-timeout 10 --max-time 60` 会避免外层 curl 无限等待。
 
+**从本地构建产物安装（不走网络拉二进制）：**
+
+已经 `make` 出 `dist/` 时，不需要再从 Release 下载：
+
+```bash
+# Linux / macOS
+sudo bash scripts/install.sh --local-dir ./dist
+```
+
+```powershell
+# Windows（管理员）
+.\scripts\install.ps1 -LocalDir .\dist
+```
+
+- Linux/macOS 从 `--local-dir` 取 `sdwan-linux-<arch>` / `sdwan-darwin-<arch>`（也兼容 `make` 产出的 `sdwan-macos-<arch>` 拼写）
+- Windows 从 `-LocalDir` 取 `panel.exe`、`sdwan-windows-amd64.exe`、`wintun.dll`
+- 目录里有 `SHA256SUMS` 时按它严格校验（缺记录/重复/格式非法一律中止）；没有该文件则打印一次提示后按可信产物安装
+- 只跳过「下载二进制」这一步；服务器测速、MTU 探测、安装后隧道验证仍需要网络
+
 **安装指定版本：**
 ```bash
 curl -fsSL .../install.sh | sudo bash -s -- 1.2.3
@@ -254,3 +273,66 @@ GOOS=windows GOARCH=amd64 go build ./cmd/sdwan
 GOOS=linux   GOARCH=amd64 go build ./cmd/sdwan
 GOOS=darwin  GOARCH=amd64 go build ./cmd/sdwan
 ```
+
+## 工具仓视角（MDRIVE_WS/tools）
+
+> 所属域：system　·　最后核对：2026-10-25
+
+- **宿主路径**：`~/dev/mdrive4/MDRIVE_WS/tools/system/sdwan-go`
+- **容器路径**：`/mdrive/tools/system/sdwan-go`
+- **仓库性质**：**独立 git 仓库**（remote `git@github.com:wantianle/sdwan-go.git`），由 `MDRIVE_WS/tools/.gitignore` 整目录排除，**不并入 tools 仓历史**。版本操作请用 `git -C .../system/sdwan-go`，不要在 tools 仓里 `git add` 本目录。
+- **为什么不合并**：两个 install 脚本的下载链路直接依赖该仓库的 GitHub Release CI；合并进本地-only 的 tools 仓会让发布链断掉。
+
+### 与 sdwan_nas 的关系
+
+| 目录 | 方案 | 说明 |
+|---|---|---|
+| `../sdwan_nas/` | 旧版 shell（`sdwand`） | 安装脚本 + `sdwan_helper.sh` + `sdwan.service` + NAS CIFS 挂载 |
+| `./`（本目录） | Go 版（`sdwan`） | 常驻 daemon、进程内自愈、DNS 缓存、Windows panel、跨平台安装器 |
+
+两者**互斥**：同一台机器不要让两套同时接管 `sdwan.service` / `iwan1`。
+
+### 依赖
+
+| 项 | 要求 |
+|---|---|
+| 构建 | Go 1.23+（当前用 go1.26 构建亦可）；`make` 需要 `CGO_ENABLED=0` 交叉编译 |
+| 运行（Linux） | systemd、`iproute2`、root 权限改动网卡/路由 |
+| 运行（macOS） | launchd、需 root 创建 utun（动态 `utunN`） |
+| 运行（Windows） | Wintun 驱动 + `wintun.dll`；daemon 由 `panel.exe` 拉起（control API `127.0.0.1:17890`） |
+| 产物 | `dist/` 下的平台二进制 + `wintun.dll`（不入库，`make` 复制） |
+
+### 已知坑
+
+- **macOS 网卡名**：不要写 `iwan1`，`water` 在 Darwin 只接受空名（内核动态分配 `utunN`）；路由按解析到的实际 `utunN` 添加。
+- **Windows 路由索引**：`route.exe IF` 用的是 IPv4 接口索引，`wmic` 的 Index 与之不一致；只认 `netsh interface ipv4 show interfaces` 的 `Idx`。
+- **Windows 默认路由/DNS**：`iwan1` 建好后必须压制 metric 并清掉其默认路由与 DNS，否则会抢走外网流量（表现为必应/网页变慢）。
+- **切换服务器会换 tunnel IP**：服务器每次分配不同 `10.100.100.x`，切换后客户端会重配 TUN IP；长连接（SSH/网页）会断。
+- **断网重连**：靠进程内自愈（`Client.Start()` + reconnectLoop）。已加 3s DNS 上限与解析缓存（失败不清缓存，5 分钟 TTL 适应换 IP），因此断网/睡眠唤醒后应几秒内自愈；`MainPID` 不变、`NRestarts=0` 是正常表现。
+- **`/etc/hosts` 固定服务器 IP 不可靠**：会被系统重写覆盖，别再依赖；用配置里的域名 + 客户端缓存。
+- **远程模式**：安装脚本需要能访问 GitHub Release；网络受限时用 `--local-dir`。
+
+### 验证
+
+```bash
+# 单元测试与静态检查
+go test -race ./...
+go vet ./...
+gofmt -l . | grep -v '^$' && echo "需要 gofmt"
+
+# 安装脚本（本地模式，无需 root/联网）
+bash scripts/test_install_local.sh
+shellcheck scripts/install.sh scripts/test_install_local.sh
+
+# 运行态
+systemctl status sdwan --no-pager          # Linux
+ip -br addr show iwan1; ip route | grep 192.168.0.0/16
+journalctl -u sdwan -n 50 --no-pager
+```
+
+### 相关
+
+- 旧版客户端：`../sdwan_nas/`
+- 车端连接/部署：skill `mdrive-device`（`device/ssh_tool`、`device/md_tool`）
+- 容器与库路径：skill `mdrive-container`
+- 逆向资料（握手协议）：`~/dev/myScript/ai/research/sdwan_reverse_engineering.md`

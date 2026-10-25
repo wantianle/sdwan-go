@@ -5,7 +5,6 @@ package core
 import (
 	"fmt"
 	"os/exec"
-	"syscall"
 
 	"github.com/songgao/water"
 )
@@ -76,5 +75,4 @@ func CloseTUN(iface TunDevice, devName string) {
 		iface.Close()
 	}
 	exec.Command("ip", "link", "delete", devName).Run()
-	syscall.Sync()
 }

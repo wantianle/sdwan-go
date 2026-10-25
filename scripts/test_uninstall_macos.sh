@@ -61,6 +61,7 @@ EOF
     cat >"$tmpdir/ps" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "${MOCK_PS_OUTPUT:-}"
+exit "${MOCK_PS_STATUS:-0}"
 EOF
     cat >"$tmpdir/rm" <<'EOF'
 #!/usr/bin/env bash
@@ -165,6 +166,12 @@ assert_preserved
 prepare_case manual
 set_prints '__ABSENT__'
 MOCK_PS_OUTPUT="123 $SDWAN_BINARY -f /tmp/iwan.conf" UNINSTALL_POLL_SECONDS=0 expect_uninstall_failure
+assert_preserved
+
+# An enumeration failure is indeterminate and keeps all managed files intact.
+prepare_case ps-query-failure
+set_prints '__ABSENT__'
+MOCK_PS_STATUS=1 MOCK_PS_OUTPUT='' UNINSTALL_POLL_SECONDS=0 expect_uninstall_failure
 assert_preserved
 
 prepare_case unrelated
