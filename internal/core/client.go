@@ -1,7 +1,9 @@
 package core
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -13,6 +15,46 @@ import (
 	controlapi "sdwan-go/pkg/controlapi"
 	protocol "sdwan-go/pkg/protocol"
 )
+
+var errDaemonStopping = errors.New("daemon is stopping")
+
+// serverResolveTimeout bounds a single DNS resolution on the connect/reconnect
+// path. The OS resolver can otherwise stall for ~10s (e.g. systemd-resolved at
+// 127.0.0.53), which dominates reconnect time; a short bound degrades fast.
+const serverResolveTimeout = 3 * time.Second
+
+// resolveLookup is a test seam over DNS resolution; production uses the default
+// resolver. It must honor ctx so serverResolveTimeout actually bounds it.
+var resolveLookup = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
+// serverIPTTL bounds how long a cached hostname -> server-IP mapping is reused.
+// After this, resolveServerAddr re-resolves so a server IP that changed (the
+// DNS record's TTL is only ~160s) is picked up automatically, without needing a
+// failed connect to evict it.
+const serverIPTTL = 5 * time.Minute
+
+// resolveNow is a test seam for the clock used by the resolved-IP cache. Go's
+// time.Now carries a monotonic reading, so time.Since stays immune to wall-clock
+// jumps.
+var resolveNow = time.Now
+
+// serverIPCache memoizes hostname -> last resolved server IP and when it was
+// resolved. When the network just came back, systemd-resolved's upstream is
+// often unreachable and DNS stalls or returns "server misbehaving"; a fresh hit
+// lets reconnect skip DNS entirely and dial a known-good IP. Entries expire
+// after serverIPTTL so a changed server IP is re-resolved automatically. IP
+// literals never enter the cache. A failed handshake deliberately does NOT
+// evict: during an outage it would only force a DNS re-resolve that stalls —
+// the very stall this cache exists to avoid.
+var serverIPCache sync.Map // hostname string -> serverIPEntry
+
+// serverIPEntry is a cached resolution: the chosen IP and when it was resolved.
+type serverIPEntry struct {
+	ip net.IP
+	at time.Time
+}
 
 // TunDevice abstracts a TUN virtual network device.
 // It provides simple Read/Write for IP packets, plus name query and close.
@@ -40,35 +82,69 @@ type Session struct {
 
 // Client is the SDWAN tunnel client
 type Client struct {
-	mu               sync.RWMutex // protects session/config/tunConfig swaps
-	config           *Config
-	tunConfig        *protocol.OPENACKResult // baseline TUN config from initial handshake
-	lastBindHint     *net.UDPAddr
-	TUN              TunDevice
-	session          *Session
-	stopCh           chan struct{}
-	reconnectCh      chan struct{}
-	stopped          bool
-	closeOnce        sync.Once
-	packetPumpOnce   sync.Once // ensures tunToServer goroutine is launched once
-	reconnectStarted atomic.Bool
-	reconnecting     atomic.Bool
-	paused           atomic.Bool
-	startupPending   atomic.Bool // true while initial tunnel connect hasn't succeeded
-	tunnelReady      atomic.Bool // true after TUN setup + Start() succeed
-	switchMu         sync.Mutex  // serializes SwitchServer calls
-	routeConflicts   []RouteConflict
-	tunCleanupMu     sync.Mutex
-	tunCleanupFn     func() // set by tryStartup on success, called by Close
+	mu                    sync.RWMutex // protects session/config/tunConfig/TUN swaps
+	config                *Config
+	tunConfig             *protocol.OPENACKResult // baseline TUN config from initial handshake
+	lastBindHint          *net.UDPAddr
+	TUN                   TunDevice
+	session               *Session
+	stopCh                chan struct{}
+	reconnectCh           chan struct{}
+	stopped               bool
+	closeOnce             sync.Once
+	lifecycleMu           sync.Mutex // closes admission before joining lifecycle work
+	lifecycleWG           sync.WaitGroup
+	packetPumpOnce        sync.Once // ensures tunToServer goroutine is launched once
+	packetPumpStarted     atomic.Bool
+	reconnectStarted      atomic.Bool
+	reconnecting          atomic.Bool
+	paused                atomic.Bool
+	startupPending        atomic.Bool // true while initial tunnel connect hasn't succeeded
+	tunnelReady           atomic.Bool // true after TUN setup + Start() succeed
+	switchMu              sync.Mutex  // serializes SwitchServer calls
+	routeConflicts        []RouteConflict
+	tunCleanupMu          sync.Mutex
+	tunCleanupFn          func()        // set by tryStartup on success, called by Close
+	beforeFinalReady      func()        // test seam for shutdown/publication interleavings
+	beforePausePublish    func()        // test seam for shutdown/pause interleavings
+	beforeInitialLaunch   func()        // test seam for initial session-loop interleavings
+	beforePumpLaunch      func()        // test seam for packet-pump/reconnect interleavings
+	onSessionLoopsStarted func()        // test seam for initial loop publication
+	startDelay            time.Duration // protocol delay; tests may set zero
 }
 
 // NewClient creates a new SDWAN client
 func NewClient(cfg *Config) *Client {
 	return &Client{
-		config:      cfg,
+		config:      cloneConfig(cfg),
 		stopCh:      make(chan struct{}),
 		reconnectCh: make(chan struct{}, 1),
+		startDelay:  3 * time.Second,
 	}
+}
+
+// beginLifecycle admits one daemon lifecycle operation. Close closes this
+// gate before waiting, so no operation can be added while shutdown is joining.
+func (c *Client) beginLifecycle() bool {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	c.mu.RLock()
+	stopped := c.stopped
+	c.mu.RUnlock()
+	if stopped {
+		return false
+	}
+	c.lifecycleWG.Add(1)
+	return true
+}
+
+func (c *Client) endLifecycle() { c.lifecycleWG.Done() }
+
+func (c *Client) acceptingLifecycle() bool {
+	c.mu.RLock()
+	accepting := !c.stopped
+	c.mu.RUnlock()
+	return accepting
 }
 
 // currentSession returns the active session pointer under the read lock.
@@ -88,8 +164,35 @@ func (c *Client) isStopped() bool {
 	return stopped
 }
 
-func (c *Client) setReady() {
+// publishReady atomically publishes final lifecycle state only while the
+// daemon remains admitted. It is the final state publication for startup and
+// switch operations.
+func (c *Client) publishReady() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return false
+	}
 	c.tunnelReady.Store(true)
+	return true
+}
+
+func (c *Client) publishReadyAndConflicts(conflicts []RouteConflict) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return false
+	}
+	c.routeConflicts = conflicts
+	c.tunnelReady.Store(true)
+	return true
+}
+
+func (c *Client) publishStartupReady() bool {
+	if c.beforeFinalReady != nil {
+		c.beforeFinalReady()
+	}
+	return c.publishReady()
 }
 
 func (c *Client) clearReady() {
@@ -109,16 +212,20 @@ func (c *Client) setSession(s *Session) (old *Session) {
 
 // SetTunnelConfig stores the baseline TUN configuration from the initial
 // handshake so SwitchServer can validate compatibility with new servers.
-func (c *Client) SetTunnelConfig(t *protocol.OPENACKResult) {
+func (c *Client) SetTunnelConfig(t *protocol.OPENACKResult) bool {
 	c.mu.Lock()
-	c.tunConfig = t
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return false
+	}
+	c.tunConfig = cloneTunnelConfig(t)
+	return true
 }
 
 // currentTunConfig returns a snapshot of the baseline tunnel config.
 func (c *Client) currentTunConfig() *protocol.OPENACKResult {
 	c.mu.RLock()
-	t := c.tunConfig
+	t := cloneTunnelConfig(c.tunConfig)
 	c.mu.RUnlock()
 	return t
 }
@@ -139,6 +246,40 @@ func cloneConfig(cfg *Config) *Config {
 	}
 	cpy := *cfg
 	return &cpy
+}
+
+func cloneTunnelConfig(cfg *protocol.OPENACKResult) *protocol.OPENACKResult {
+	if cfg == nil {
+		return nil
+	}
+	cpy := *cfg
+	cpy.GateMAC = append([]byte(nil), cfg.GateMAC...)
+	return &cpy
+}
+
+func (c *Client) currentTUN() TunDevice {
+	c.mu.RLock()
+	tun := c.TUN
+	c.mu.RUnlock()
+	return tun
+}
+
+func (c *Client) publishTUN(tun TunDevice) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return false
+	}
+	c.TUN = tun
+	return true
+}
+
+func (c *Client) clearTUN(tun TunDevice) {
+	c.mu.Lock()
+	if tun == nil || c.TUN == tun {
+		c.TUN = nil
+	}
+	c.mu.Unlock()
 }
 
 // checkTunnelCompatible returns an error if the new protocol.OPENACKResult requires an
@@ -173,19 +314,24 @@ func (c *Client) applyTunnelConfig(tunCfg *protocol.OPENACKResult) error {
 	if tunCfg.LocalIP == old.LocalIP && tunCfg.GatewayIP == old.GatewayIP {
 		return nil
 	}
-	if c.TUN == nil {
+	tun := c.currentTUN()
+	if tun == nil {
 		return fmt.Errorf("cannot reconfigure tunnel IP: TUN is nil")
 	}
 
 	localCIDR := tunCfg.LocalIP + "/24"
 	log.Printf("[SWITCH] Reconfiguring TUN %s IP %s/%s -> %s/%s",
-		c.TUN.Name(), old.LocalIP, old.GatewayIP, tunCfg.LocalIP, tunCfg.GatewayIP)
-	if err := SetTUNIP(c.TUN.Name(), localCIDR, tunCfg.GatewayIP); err != nil {
+		tun.Name(), old.LocalIP, old.GatewayIP, tunCfg.LocalIP, tunCfg.GatewayIP)
+	if err := SetTUNIP(tun.Name(), localCIDR, tunCfg.GatewayIP); err != nil {
 		return fmt.Errorf("set switched TUN IP: %w", err)
 	}
 
 	c.mu.Lock()
-	c.tunConfig = tunCfg
+	if c.stopped {
+		c.mu.Unlock()
+		return fmt.Errorf("switch rejected: %w", errDaemonStopping)
+	}
+	c.tunConfig = cloneTunnelConfig(tunCfg)
 	c.mu.Unlock()
 	return nil
 }
@@ -198,12 +344,22 @@ func (c *Client) isCurrentSession(s *Session) bool {
 	return s == cur
 }
 
-// currentConfig returns a snapshot of the active config pointer.
+// currentConfig returns an immutable snapshot of the active configuration.
 func (c *Client) currentConfig() *Config {
 	c.mu.RLock()
-	cfg := c.config
+	cfg := cloneConfig(c.config)
 	c.mu.RUnlock()
 	return cfg
+}
+
+func (c *Client) setConfigMTU(mtu int) {
+	c.mu.Lock()
+	if !c.stopped && c.config != nil {
+		cfg := cloneConfig(c.config)
+		cfg.MTU = mtu
+		c.config = cfg
+	}
+	c.mu.Unlock()
 }
 
 func copyUDPAddr(a *net.UDPAddr) *net.UDPAddr {
@@ -364,10 +520,53 @@ func (c *Client) Status() *controlapi.StatusResult {
 	return sr
 }
 
+// resolveServerAddr turns the configured server into a *net.UDPAddr. An IP
+// literal skips DNS entirely. A hostname first consults serverIPCache so a
+// known-working IP is reused without touching DNS (important right after a
+// network flap); a hit older than serverIPTTL falls through so a changed server
+// IP is picked up. On a miss it resolves with a short bounded timeout
+// (serverResolveTimeout), preferring IPv4, and caches the chosen IP plus the
+// resolution time. The returned error is wrapped by newSession as
+// "resolve server: %w".
+func resolveServerAddr(server string, port int) (*net.UDPAddr, error) {
+	if ip := net.ParseIP(server); ip != nil {
+		return &net.UDPAddr{IP: ip, Port: port}, nil
+	}
+
+	if cached, ok := serverIPCache.Load(server); ok {
+		if entry, ok := cached.(serverIPEntry); ok && entry.ip != nil &&
+			resolveNow().Sub(entry.at) < serverIPTTL {
+			return &net.UDPAddr{IP: entry.ip, Port: port}, nil
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), serverResolveTimeout)
+	defer cancel()
+
+	ips, err := resolveLookup(ctx, server)
+	if err != nil {
+		return nil, err
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no addresses for host %q", server)
+	}
+
+	now := resolveNow()
+	// Prefer IPv4.
+	for _, ia := range ips {
+		if v4 := ia.IP.To4(); v4 != nil {
+			serverIPCache.Store(server, serverIPEntry{ip: v4, at: now})
+			return &net.UDPAddr{IP: v4, Port: port}, nil
+		}
+	}
+	serverIPCache.Store(server, serverIPEntry{ip: ips[0].IP, at: now})
+	return &net.UDPAddr{IP: ips[0].IP, Port: port}, nil
+}
+
 // newSession resolves and dials the UDP server from config, returning a
 // Session with the live connection but without performing a handshake.
 func newSession(cfg *Config, localAddr *net.UDPAddr) (*Session, error) {
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", cfg.Server, cfg.Port))
+	addr, err := resolveServerAddr(cfg.Server, cfg.Port)
 	if err != nil {
 		return nil, fmt.Errorf("resolve server: %w", err)
 	}
@@ -389,11 +588,23 @@ func newSession(cfg *Config, localAddr *net.UDPAddr) (*Session, error) {
 // Connect opens the UDP socket and initialises the Session.
 // If a session already exists it is closed before the new one is assigned.
 func (c *Client) Connect() error {
-	s, err := newSession(c.config, nil)
+	cfg := c.currentConfig()
+	if cfg == nil || c.isStopped() {
+		return fmt.Errorf("connect rejected: daemon is stopping")
+	}
+	s, err := newSession(cfg, nil)
 	if err != nil {
 		return err
 	}
-	old := c.setSession(s)
+	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		s.Close()
+		return fmt.Errorf("connect rejected: daemon is stopping")
+	}
+	old := c.session
+	c.session = s
+	c.mu.Unlock()
 	if old != nil {
 		old.Close()
 	}
@@ -417,7 +628,11 @@ func (c *Client) Handshake() ([]byte, error) {
 	if s == nil {
 		return nil, fmt.Errorf("not connected: call Connect first")
 	}
-	return s.Handshake(c.config)
+	cfg := c.currentConfig()
+	if cfg == nil || c.isStopped() {
+		return nil, fmt.Errorf("handshake rejected: daemon is stopping")
+	}
+	return s.Handshake(cfg)
 }
 
 // Handshake sends the OPEN packet over this session's UDP connection and
@@ -511,19 +726,64 @@ func (c *Client) Start() error {
 		return fmt.Errorf("not connected: call Connect first")
 	}
 
-	log.Println("[INFO] Tunnel established, starting daemon loops...")
-	c.startSessionLoops(s)
+	if c.beforeInitialLaunch != nil {
+		c.beforeInitialLaunch()
+	}
+	// Publish session loops immediately, preserving the original first ECHOREQ
+	// timing. Close shares this boundary, so shutdown cannot start them late.
+	c.lifecycleMu.Lock()
+	stopped := c.isStopped()
+	if !stopped {
+		log.Println("[INFO] Tunnel established, starting daemon loops...")
+		c.startSessionLoops(s)
+	}
+	c.lifecycleMu.Unlock()
+	if stopped {
+		return errDaemonStopping
+	}
 
 	// Preserve Run()'s protocol timing: the server expects the first ECHOREQ
 	// before accepting DATA, so delay TUN forwarding briefly.
-	time.Sleep(3 * time.Second)
-	c.startPacketPumpOnce()
-	c.startReconnect()
+	select {
+	case <-c.stopCh:
+		return errDaemonStopping
+	case <-time.After(c.startDelay):
+	}
+	if c.beforePumpLaunch != nil {
+		c.beforePumpLaunch()
+	}
+	// Publish packet forwarding and reconnect only after the protocol delay.
+	// c.mu is not held while launching goroutines.
+	c.lifecycleMu.Lock()
+	stopped = c.isStopped()
+	if !stopped {
+		c.startPacketPumpOnce()
+		c.startReconnect()
+	}
+	c.lifecycleMu.Unlock()
+	if stopped {
+		return errDaemonStopping
+	}
 	return nil
 }
 
-func (c *Client) SetPaused(paused bool) {
-	c.paused.Store(paused)
+func (c *Client) SetPaused(paused bool) bool {
+	if c.beforePausePublish != nil {
+		c.beforePausePublish()
+	}
+	// Keep the admission lock through the state transition so Close cannot mark
+	// the daemon stopped between accepting a pause request and publishing it.
+	c.lifecycleMu.Lock()
+	c.mu.Lock()
+	stopped := c.stopped
+	if !stopped {
+		c.paused.Store(paused)
+	}
+	c.mu.Unlock()
+	c.lifecycleMu.Unlock()
+	if stopped {
+		return false
+	}
 	if paused {
 		c.reconnecting.Store(false)
 		if hint := c.currentBindHint(); hint != nil {
@@ -533,7 +793,7 @@ func (c *Client) SetPaused(paused bool) {
 		if old != nil {
 			old.Close()
 		}
-		return
+		return true
 	}
 	if c.currentSession() == nil && !c.isStopped() {
 		select {
@@ -541,6 +801,7 @@ func (c *Client) SetPaused(paused bool) {
 		default:
 		}
 	}
+	return true
 }
 
 func (c *Client) Paused() bool {
@@ -548,10 +809,14 @@ func (c *Client) Paused() bool {
 }
 
 // SetRouteConflicts stores the current route conflict snapshot.
-func (c *Client) SetRouteConflicts(conflicts []RouteConflict) {
+func (c *Client) SetRouteConflicts(conflicts []RouteConflict) bool {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return false
+	}
 	c.routeConflicts = conflicts
-	c.mu.Unlock()
+	return true
 }
 
 func (c *Client) startReconnect() {
@@ -648,6 +913,7 @@ func (c *Client) reconnectLoop() {
 // exactly once. Safe to call from Run, Start, and SwitchServer paths.
 func (c *Client) startPacketPumpOnce() {
 	c.packetPumpOnce.Do(func() {
+		c.packetPumpStarted.Store(true)
 		go c.tunToServer()
 	})
 }
@@ -676,8 +942,8 @@ func (c *Client) sessionToTUN(s *Session) error {
 			// 0x14 = unencrypted DATA, 0x18 = encrypted DATA
 			// Both share 8-byte header, skip it for TUN write
 			if len(data) > 8 {
-				if c.TUN != nil {
-					c.TUN.Write(data[8:])
+				if tun := c.currentTUN(); tun != nil {
+					tun.Write(data[8:])
 				}
 			}
 		case 0x11: // CLOSE
@@ -708,6 +974,9 @@ func (c *Client) runSessionToTUN(s *Session) {
 func (c *Client) startSessionLoops(s *Session) {
 	go c.heartbeatLoop(s)
 	go c.runSessionToTUN(s)
+	if c.onSessionLoopsStarted != nil {
+		c.onSessionLoopsStarted()
+	}
 }
 
 // failSession atomically clears c.session if it still points to s, then
@@ -752,11 +1021,12 @@ func (c *Client) tunToServer() {
 			return
 		default:
 		}
-		if c.TUN == nil {
+		tun := c.currentTUN()
+		if tun == nil {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		n, err := c.TUN.Read(buf)
+		n, err := tun.Read(buf)
 		if err != nil {
 			if c.isStopped() {
 				return
@@ -849,11 +1119,20 @@ func buildDataPacket(sessionID uint16, seq uint32, payload []byte, encrypt int) 
 //
 // This is purely a convenience helper — the existing one-shot path in
 // RunOnce continues to use Client.Connect + Client.Handshake separately.
-func connectAndHandshakeSession(cfg *Config, localAddr *net.UDPAddr) (*Session, []byte, error) {
+func connectAndHandshakeSession(client *Client, cfg *Config, localAddr *net.UDPAddr) (*Session, []byte, error) {
 	s, err := newSession(cfg, localAddr)
 	if err != nil {
 		return nil, nil, err
 	}
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-client.stopCh:
+			s.Close()
+		case <-finished:
+		}
+	}()
 	raw, err := s.Handshake(cfg)
 	if err != nil {
 		s.Close()
@@ -871,11 +1150,14 @@ func connectAndHandshakeSession(cfg *Config, localAddr *net.UDPAddr) (*Session, 
 // returned. On failure the new session is closed and an error is returned;
 // the existing session is left untouched.
 func (c *Client) SwitchServer(next *Config) (*protocol.OPENACKResult, error) {
-	c.paused.Store(false)
-
+	if !c.beginLifecycle() {
+		return nil, fmt.Errorf("switch rejected: %w", errDaemonStopping)
+	}
+	defer c.endLifecycle()
 	if c.startupPending.Load() {
 		return nil, fmt.Errorf("switch rejected: daemon is still starting, wait for running state")
 	}
+	c.paused.Store(false)
 
 	if !c.switchMu.TryLock() {
 		return nil, fmt.Errorf("switch already in progress")
@@ -896,13 +1178,23 @@ func (c *Client) SwitchServer(next *Config) (*protocol.OPENACKResult, error) {
 	if bindHint != nil {
 		log.Printf("[SWITCH] Binding new session to source=%s", bindHint.IP.String())
 	}
-	newS, raw, err := connectAndHandshakeSession(nextCfg, bindHint)
+	newS, raw, err := connectAndHandshakeSession(c, nextCfg, bindHint)
 	if err != nil && bindHint != nil {
+		if c.isStopped() {
+			return nil, fmt.Errorf("switch interrupted: %w", errDaemonStopping)
+		}
 		log.Printf("[SWITCH] Bind-hinted session failed (%v); retrying without source bind", err)
-		newS, raw, err = connectAndHandshakeSession(nextCfg, nil)
+		newS, raw, err = connectAndHandshakeSession(c, nextCfg, nil)
 	}
 	if err != nil {
+		if c.isStopped() {
+			return nil, fmt.Errorf("switch interrupted: %w", errDaemonStopping)
+		}
 		return nil, fmt.Errorf("switch: %w", err)
+	}
+	if !c.acceptingLifecycle() {
+		newS.Close()
+		return nil, fmt.Errorf("switch rejected: %w", errDaemonStopping)
 	}
 
 	// c) parse OPENACK
@@ -932,6 +1224,11 @@ func (c *Client) SwitchServer(next *Config) (*protocol.OPENACKResult, error) {
 
 	// e+f) atomically swap session + config
 	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		newS.Close()
+		return nil, fmt.Errorf("switch rejected: %w", errDaemonStopping)
+	}
 	old := c.session
 	c.session = newS
 	c.config = nextCfg
@@ -942,18 +1239,32 @@ func (c *Client) SwitchServer(next *Config) (*protocol.OPENACKResult, error) {
 		old.Close()
 	}
 
-	// h) launch per-session goroutines for the new session
-	c.startSessionLoops(newS)
-
-	// i) ensure TUN→server pump is running
-	c.startPacketPumpOnce()
-
-	// No conflicts after successful switch (routes get reapplied if needed)
-	c.SetRouteConflicts(nil)
+	if !c.publishSwitchedSession(newS) {
+		return nil, fmt.Errorf("switch rejected: %w", errDaemonStopping)
+	}
 
 	log.Printf("[SWITCH] Switched to %s:%d session=%d", nextCfg.Server, nextCfg.Port, newS.id)
-	c.setReady()
 	return tunCfg, nil
+}
+
+// publishSwitchedSession is the final switch boundary. It serializes its
+// stopped-state publication and loop launch with Close, without holding c.mu
+// while starting goroutines.
+func (c *Client) publishSwitchedSession(newS *Session) bool {
+	if c.beforeFinalReady != nil {
+		c.beforeFinalReady()
+	}
+	c.lifecycleMu.Lock()
+	published := c.publishReadyAndConflicts(nil)
+	if published {
+		c.startSessionLoops(newS)
+		c.startPacketPumpOnce()
+	}
+	c.lifecycleMu.Unlock()
+	if !published {
+		c.failSession(newS, errDaemonStopping)
+	}
+	return published
 }
 
 // Close nil-safely and idempotently closes the underlying UDP connection.
@@ -1026,11 +1337,15 @@ func (c *Client) runTUNCleanup() {
 // Close cleans up resources. Safe to call multiple times.
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
+		c.lifecycleMu.Lock()
 		c.mu.Lock()
 		c.stopped = true
+		c.tunnelReady.Store(false)
 		c.mu.Unlock()
+		c.lifecycleMu.Unlock()
 		close(c.stopCh)
 		c.closeSession()
+		c.lifecycleWG.Wait()
 
 		c.runTUNCleanup()
 	})

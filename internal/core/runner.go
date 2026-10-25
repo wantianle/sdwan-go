@@ -20,9 +20,32 @@ import (
 // carries a prefix explicitly.
 const protocolIPv4Prefix = 24
 
-// RunOnce loads iwan.conf from configPath and runs the full one-shot SD-WAN
-// tunnel lifecycle: load config, connect UDP, handshake, create TUN, assign
-// IP, add route, then block in the main loop until a signal or error.
+// Bounded retry policy for RunOnce's initial UDP connect + handshake. A short
+// transient startup network hiccup must not force systemd/launchd to restart
+// the whole tunnel (which would reassign a new tunnel IP).
+const (
+	runOnceStartupAttempts = 3
+	runOnceStartupBackoff  = 500 * time.Millisecond
+)
+
+// Test seams for RunOnce. Production uses the real implementations; focused
+// tests override these to avoid requiring CAP_NET_ADMIN (real TUN device) and
+// to drive shutdown without delivering process-wide signals.
+var (
+	runOnceSetupTUN = setupTUN
+	runOnceSignals  = func() (<-chan os.Signal, func()) {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+		return ch, func() { signal.Stop(ch) }
+	}
+)
+
+// RunOnce loads iwan.conf from configPath and runs the full foreground SD-WAN
+// tunnel lifecycle: load config, connect UDP (bounded startup retry),
+// handshake, create TUN, assign IP, add route, start the self-healing session
+// loops, then block until a signal. Transient session failures are recovered
+// in-process by the reconnect worker instead of returning and exiting, so a
+// link blip does not trigger a supervisor restart with a new tunnel IP.
 //
 // Callers own log-file setup and CLI argument parsing; RunOnce uses the
 // global log package so any log output configured by the caller is preserved.
@@ -40,18 +63,16 @@ func RunOnce(configPath string) error {
 	client := NewClient(cfg)
 	defer client.Close()
 
-	// 3. Connect to server
-	if err := client.Connect(); err != nil {
-		return fmt.Errorf("UDP connect: %w", err)
+	// 3+4. Connect and handshake with a bounded startup retry so a transient
+	// startup-time network hiccup does not force a systemd/launchd restart.
+	// Auth rejection is terminal and is never retried.
+	log.Println("[AUTH] Waiting for OPENACK...")
+	openAck, err := connectWithRetry(client.Connect, client.Handshake,
+		runOnceStartupAttempts, runOnceStartupBackoff)
+	if err != nil {
+		return err
 	}
 	log.Printf("[INFO] UDP connected to %s:%d", cfg.Server, cfg.Port)
-
-	// 4. Handshake
-	log.Println("[AUTH] Waiting for OPENACK...")
-	openAck, err := client.Handshake()
-	if err != nil {
-		return fmt.Errorf("handshake: %w", err)
-	}
 	log.Println("[AUTH] Authenticated successfully")
 
 	// Parse TUN configuration from OPENACK
@@ -63,25 +84,25 @@ func RunOnce(configPath string) error {
 	log.Printf("[TUN] Local IP=%s Gateway=%s DNS=%s MTU=%d",
 		tunCfg.LocalIP, tunCfg.GatewayIP, tunCfg.DNSIP, tunCfg.MTU)
 
-	// 4. Apply server-assigned tunnel configuration
+	// 5. Apply server-assigned tunnel configuration
 	client.SetTunnelConfig(tunCfg)
 	if tunCfg.MTU > 0 {
 		cfg.MTU = int(tunCfg.MTU)
+		client.setConfigMTU(cfg.MTU)
 	}
 
-	// 5. Create TUN, assign IP, add route (with retry + cleanup wiring)
-	tunName, tunCleanup, err := setupTUN(cfg, tunCfg, client)
+	// 6. Create TUN, assign IP, add route (with retry + cleanup wiring)
+	tunName, tunCleanup, err := runOnceSetupTUN(cfg, tunCfg, client)
 	if err != nil {
 		return err
 	}
 	defer tunCleanup()
 
-	// 8. Handle signals for clean shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
+	// 7. Handle signals for clean shutdown
+	sigCh, stopSignals := runOnceSignals()
+	defer stopSignals()
 
-	// 9. Show status
+	// 8. Show status
 	fmt.Println()
 	log.Println("[STATUS] SDWAN tunnel is running")
 	log.Printf("  Server:  %s:%d", cfg.Server, cfg.Port)
@@ -91,24 +112,65 @@ func RunOnce(configPath string) error {
 	log.Printf("  Route:   %s -> %s", cfg.RouteNet, tunName)
 	fmt.Println()
 
-	// 10. Run main loop in background
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- client.Run()
-	}()
-
-	// 11. Wait for signal or error
-	select {
-	case sig := <-sigCh:
-		log.Printf("[INFO] Received signal %v, shutting down...", sig)
-	case err := <-errCh:
-		if err != nil {
-			log.Printf("[ERROR] Client error: %v", err)
-		}
+	// 9. Start the self-healing session loops (session loops + packet pump +
+	// reconnect worker) and block until a shutdown signal. Transient session
+	// failures are recovered in-process instead of returning and exiting.
+	sig, err := runTunnelPhase(client, sigCh)
+	if err != nil {
+		return err
 	}
+	log.Printf("[INFO] Received signal %v, shutting down...", sig)
+
+	// 10. Close before the deferred route/TUN cleanup so the session loops and
+	// packet pump stop while the adapter is still alive.
+	client.Close()
 
 	log.Println("[INFO] Shutdown complete")
 	return nil
+}
+
+// connectWithRetry performs the initial UDP connect + handshake with a bounded
+// number of attempts and a short fixed backoff between them. Resolve, dial and
+// read-timeout errors are transient and retried; authentication rejection is
+// terminal and returned immediately without another attempt.
+func connectWithRetry(connect func() error, handshake func() ([]byte, error), attempts int, backoff time.Duration) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := connect(); err != nil {
+			lastErr = fmt.Errorf("UDP connect: %w", err)
+		} else {
+			raw, err := handshake()
+			if err == nil {
+				return raw, nil
+			}
+			lastErr = fmt.Errorf("handshake: %w", err)
+		}
+		if isAuthRejection(lastErr) {
+			return nil, lastErr
+		}
+		if attempt < attempts {
+			log.Printf("[STARTUP] Initial connect attempt %d/%d failed: %v; retrying in %s",
+				attempt, attempts, lastErr, backoff)
+			time.Sleep(backoff)
+		}
+	}
+	return nil, lastErr
+}
+
+// runTunnelPhase starts the client's self-healing session loops via Start
+// (heartbeat + server→TUN + TUN→server packet pump + reconnect worker,
+// preserving the first-ECHOREQ-before-DATA ordering) and blocks until a
+// shutdown signal is delivered on sigCh. Transient session failures are
+// absorbed by the reconnect worker and never return control here, so the
+// foreground process stays alive instead of letting the service supervisor
+// restart the tunnel with a new IP.
+func runTunnelPhase(client *Client, sigCh <-chan os.Signal) (os.Signal, error) {
+	if err := client.Start(); err != nil {
+		return nil, fmt.Errorf("start client: %w", err)
+	}
+	log.Println("[INFO] Auto-reconnect enabled: transient session failures will be recovered in-process")
+	sig := <-sigCh
+	return sig, nil
 }
 
 // ControlOptions holds daemon-mode local control API settings.
@@ -117,10 +179,35 @@ type ControlOptions struct {
 	TokenFile string // optional path to a static token file
 }
 
-// tryStartup performs the full initial connect/handshake/TUN/Start sequence
-// with retry. Returns nil on success. Auth rejection stops retrying immediately.
-// Network, DNS, and other transient errors trigger backoff and retry.
+// tryStartup starts and joins one initial daemon lifecycle attempt. Production
+// starts it through startTryStartup so admission occurs before the goroutine is
+// launched; this wrapper keeps direct callers safe as well.
 func tryStartup(client *Client, cfg *Config) {
+	if !client.beginLifecycle() {
+		return
+	}
+	defer client.endLifecycle()
+	tryStartupAdmitted(client, cfg)
+}
+
+func startTryStartup(client *Client, cfg *Config) bool {
+	if !client.beginLifecycle() {
+		return false
+	}
+	go func() {
+		defer client.endLifecycle()
+		tryStartupAdmitted(client, cfg)
+	}()
+	return true
+}
+
+// tryStartupAdmitted performs the full initial connect/handshake/TUN/Start
+// sequence with retry. The caller must have already admitted lifecycle work.
+func tryStartupAdmitted(client *Client, cfg *Config) {
+	cfg = cloneConfig(cfg)
+	if cfg == nil {
+		return
+	}
 	client.startupPending.Store(true)
 	defer client.startupPending.Store(false)
 
@@ -168,22 +255,28 @@ func tryStartup(client *Client, cfg *Config) {
 		}
 		log.Printf("[TUN] Local IP=%s Gateway=%s DNS=%s MTU=%d", tunCfg.LocalIP, tunCfg.GatewayIP, tunCfg.DNSIP, tunCfg.MTU)
 
-		client.SetTunnelConfig(tunCfg)
+		if !client.SetTunnelConfig(tunCfg) {
+			return
+		}
 		if tunCfg.MTU > 0 {
 			cfg.MTU = int(tunCfg.MTU)
+			client.setConfigMTU(cfg.MTU)
 		}
 
 		// 4. Setup TUN
 		tunName, tunCleanup, err := setupTUN(cfg, tunCfg, client)
 		if err != nil {
 			log.Printf("[STARTUP] TUN setup failed: %v", err)
-			client.TUN = nil // clear TUN on failure
+			client.clearTUN(nil) // clear TUN on failure
 			// setupTUN already cleans up on failure
 			backoff = sleepWithBackoff(client, backoff)
 			continue
 		}
 		// Store cleanup so RunDaemon's deferred Close() tears down TUN + routes
 		client.SetTUNCleanup(tunCleanup)
+		if client.isStopped() {
+			return
+		}
 
 		log.Printf("[ROUTE] Added %s -> %s", cfg.RouteNet, tunName)
 
@@ -191,14 +284,17 @@ func tryStartup(client *Client, cfg *Config) {
 		if err := client.Start(); err != nil {
 			log.Printf("[STARTUP] Daemon start failed: %v", err)
 			client.runTUNCleanup()
-			client.TUN = nil // clear TUN reference
+			client.clearTUN(nil) // clear TUN reference
 			backoff = sleepWithBackoff(client, backoff)
 			continue
 		}
 
 		log.Printf("[INFO] Tunnel established, starting daemon loops...")
 
-		client.setReady()
+		// Final ready publication is atomic with the stopped-state check.
+		if !client.publishStartupReady() {
+			return
+		}
 
 		// Trigger the existing reconnect mechanism so future disconnects are handled
 		select {
@@ -288,8 +384,10 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 
 	log.Printf("[CTRL] Control API listening on %s (awaiting tunnel...)", opts.Addr)
 
-	// 5. Start tunnel in background goroutine
-	go tryStartup(client, cfg)
+	// 5. Admit startup before launching it so Close always joins its completion.
+	if !startTryStartup(client, cfg) {
+		return fmt.Errorf("daemon is stopping")
+	}
 
 	// 6. Signal handling
 	sigCh := make(chan os.Signal, 1)
@@ -312,6 +410,8 @@ func RunDaemon(configPath string, opts ControlOptions) error {
 	case <-shutdownCh:
 		log.Println("[INFO] Received shutdown via control API")
 	}
+	// Close admission and join startup/switch/reconnect before route/TUN cleanup.
+	client.Close()
 	log.Println("[INFO] Daemon shutdown complete")
 	return nil
 }
@@ -370,8 +470,17 @@ func setupTUNWithOps(cfg *Config, tunCfg *protocol.OPENACKResult, client *Client
 	log.Printf("[ROUTE] Added %s -> %s", cfg.RouteNet, tunName)
 
 	// Commit only after the adapter and route are both fully configured.
-	client.TUN = tun
-	client.SetRouteConflicts(conflicts)
+	if !client.publishTUN(tun) {
+		ops.delRoute(cfg.RouteNet, tunName, routeGW)
+		ops.close(tun, tunName)
+		return "", nil, fmt.Errorf("%w", errDaemonStopping)
+	}
+	if !client.SetRouteConflicts(conflicts) {
+		ops.delRoute(cfg.RouteNet, tunName, routeGW)
+		client.clearTUN(tun)
+		ops.close(tun, tunName)
+		return "", nil, fmt.Errorf("%w", errDaemonStopping)
+	}
 	for _, c := range conflicts {
 		log.Printf("[ROUTE] WARNING: SDWAN route %s overlaps with local %s subnet %s — local traffic for %s will NOT go through VPN",
 			c.RouteNet, c.Interface, c.LocalCIDR, c.LocalCIDR)
@@ -379,7 +488,12 @@ func setupTUNWithOps(cfg *Config, tunCfg *protocol.OPENACKResult, client *Client
 
 	var cleanupOnce sync.Once
 	cleanup = func() {
-		cleanupOnce.Do(func() { ops.delRoute(cfg.RouteNet, tunName, routeGW); ops.close(tun, tunName) })
+		cleanupOnce.Do(func() {
+			// Route ownership is released before the handle, as required by A2.
+			ops.delRoute(cfg.RouteNet, tunName, routeGW)
+			client.clearTUN(tun)
+			ops.close(tun, tunName)
+		})
 	}
 	return tunName, cleanup, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -70,6 +71,10 @@ func newControlMux(c *Client, switchFn switchServerFunc, shutdownCh chan<- struc
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		if !c.acceptingLifecycle() {
+			writeJSONError(w, http.StatusServiceUnavailable, "daemon is stopping")
+			return
+		}
 
 		var req switchRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -93,6 +98,10 @@ func newControlMux(c *Client, switchFn switchServerFunc, shutdownCh chan<- struc
 
 		tun, err := switchFn(nextCfg)
 		if err != nil {
+			if errors.Is(err, errDaemonStopping) {
+				writeJSONError(w, http.StatusServiceUnavailable, "daemon is stopping")
+				return
+			}
 			writeJSONError(w, http.StatusInternalServerError, "switch failed: "+err.Error())
 			return
 		}
@@ -113,12 +122,19 @@ func newControlMux(c *Client, switchFn switchServerFunc, shutdownCh chan<- struc
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		if !c.acceptingLifecycle() {
+			writeJSONError(w, http.StatusServiceUnavailable, "daemon is stopping")
+			return
+		}
 		var req controlapi.PauseRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		c.SetPaused(req.Pause)
+		if !c.SetPaused(req.Pause) {
+			writeJSONError(w, http.StatusServiceUnavailable, "daemon is stopping")
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(controlapi.PauseResponse{Status: c.Status(), Paused: c.Paused()})
 	})
