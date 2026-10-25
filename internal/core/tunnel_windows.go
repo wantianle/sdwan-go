@@ -7,7 +7,9 @@ import (
 	"log"
 	"net"
 	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun"
@@ -20,6 +22,17 @@ type wintunDev struct {
 	dev  tun.Device
 	name string
 }
+
+type windowsRouteKey struct {
+	tunName string
+	target  string
+	mask    string
+}
+
+var windowsRouteIndexes = struct {
+	sync.Mutex
+	byRoute map[windowsRouteKey]string
+}{byRoute: make(map[windowsRouteKey]string)}
 
 func (d *wintunDev) Read(buf []byte) (int, error) {
 	bufs := [][]byte{buf}
@@ -37,42 +50,13 @@ func (d *wintunDev) Write(buf []byte) (int, error) {
 func (d *wintunDev) Name() string { return d.name }
 func (d *wintunDev) Close() error { return d.dev.Close() }
 
-// CreateTUN creates a wintun TUN adapter (Layer 3, reads/writes IP packets).
-// localCIDR is accepted for cross-platform signature compatibility; unused here
-// because wintun does not need IP pre-configuration like tap0901 TUN mode does.
-//
-// IMPORTANT: tun.CreateTUN from wireguard-go/wintun always creates a NEW
-// adapter instance — it never reopens an existing one. If an old adapter
-// with the same name already exists, CreateTUN will create another with a
-// suffixed name (e.g. "iwan1 #2"), leaving the old one orphaned in Device
-// Manager. Therefore we must ALWAYS delete the old adapter first.
+// CreateTUN creates or reopens a named Wintun adapter (Layer 3, reads/writes
+// IP packets). The pinned wireguard/tun implementation reuses an existing
+// adapter with the requested name. localCIDR is accepted for cross-platform
+// signature compatibility; it is unused here because Wintun does not need IP
+// pre-configuration like tap0901 TUN mode does.
 func CreateTUN(name string, mtu int, _ string) (TunDevice, error) {
 	log.Printf("[WINTUN] Creating adapter name=%q mtu=%d", name, mtu)
-	log.Printf("[WINTUN] Note: wintun adapter may not be visible in ncpa.cpl; use Device Manager or 'wmic nic get Name,Index' to verify")
-
-	// --- Always clean up any existing adapter first ---
-	// Errors are ignored — the adapter may not exist on first run.
-
-	// Release IP binding (ignore errors)
-	exec.Command("netsh", "interface", "ip", "set", "address",
-		name, "dhcp").Run()
-
-	// Force-disable the interface to release driver handles
-	exec.Command("netsh", "interface", "set", "interface",
-		name, "admin=disable").Run()
-
-	// Delete all matching adapters (exact + suffixed like "iwan1 #2")
-	if out, err := exec.Command("wmic", "path", "Win32_NetworkAdapter",
-		"where", fmt.Sprintf("NetConnectionID like '%s%%'", name), "delete").CombinedOutput(); err == nil {
-		log.Printf("[WINTUN] Cleaned up old adapter(s) matching %q", name)
-	} else {
-		log.Printf("[WINTUN] No old adapter to clean (or cleanup skipped): %s", string(out))
-	}
-
-	// Give the system a moment to actually release the adapter name
-	time.Sleep(500 * time.Millisecond)
-
-	// --- Create the new adapter ---
 	dev, err := tun.CreateTUN(name, mtu)
 	if err != nil {
 		log.Printf("[WINTUN] FAILED: %v", err)
@@ -80,7 +64,9 @@ func CreateTUN(name string, mtu int, _ string) (TunDevice, error) {
 		return nil, fmt.Errorf("create wintun adapter: %w", err)
 	}
 
-	// Give Windows a moment to register the new adapter in the IP stack
+	// Wait for the created or reopened adapter to register in the IP stack
+	// before the caller configures it. This is a registration settle, not an
+	// adapter-deletion delay.
 	time.Sleep(500 * time.Millisecond)
 
 	ifaceName, _ := dev.Name()
@@ -123,9 +109,7 @@ func cleanupWindowsTunRouting(name, dummyGW string) {
 
 	idx, err := getTunIndex(name)
 	if err != nil {
-		log.Printf("[WINTUN] default route cleanup skipped interface-scoped delete: %v", err)
-		runWindowsCleanup("delete default route", "route", "delete", "0.0.0.0", "mask", "0.0.0.0", dummyGW)
-		runWindowsCleanup("delete persistent default route", "route", "-p", "delete", "0.0.0.0", "mask", "0.0.0.0", dummyGW)
+		log.Printf("[WINTUN] cleanup incomplete: default-route deletion skipped for interface=%q gateway=%s because authoritative IPv4 interface index is unavailable: %v", name, dummyGW, err)
 		return
 	}
 
@@ -143,16 +127,17 @@ func runWindowsCleanup(label, name string, args ...string) {
 	log.Printf("[WINTUN] cleanup OK: %s", label)
 }
 
-// getTunIndex finds the Windows interface index for the given adapter name.
+// getTunIndex finds the route-compatible Windows IPv4 interface index for the
+// given adapter name.
 func getTunIndex(ifaceName string) (string, error) {
 	log.Printf("[WINTUN] Looking up interface index for %q", ifaceName)
 
-	// Prefer the IPv4 interface Idx from netsh. This is the index expected by
-	// route.exe "IF <idx>" and may differ from Win32_NetworkAdapter.Index.
+	// The IPv4 interface Idx from netsh is the index expected by route.exe
+	// "IF <idx>".
 	if out, err := exec.Command("netsh", "interface", "ipv4", "show", "interfaces").Output(); err == nil {
 		for _, line := range strings.Split(string(out), "\n") {
 			fields := strings.Fields(strings.TrimSpace(line))
-			if len(fields) < 5 || !allDigits(fields[0]) {
+			if len(fields) < 5 || !validWindowsInterfaceIndex(fields[0]) {
 				continue
 			}
 			name := strings.Join(fields[4:], " ")
@@ -166,82 +151,94 @@ func getTunIndex(ifaceName string) (string, error) {
 		log.Printf("[WINTUN] netsh ipv4 interface query failed: %v", err)
 	}
 
-	// Try NetConnectionID (the internal adapter name)
-	for _, field := range []string{"NetConnectionID", "Name"} {
-		out, err := exec.Command("wmic", "nic",
-			"where", fmt.Sprintf("%s='%s'", field, ifaceName),
-			"get", "Index").Output()
-		if err != nil {
-			log.Printf("[WINTUN] wmic %s query failed: %v", field, err)
-			continue
-		}
-		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		if len(lines) >= 2 {
-			idx := strings.TrimSpace(lines[1])
-			if idx != "" {
-				log.Printf("[WINTUN] Found fallback adapter index=%s via wmic %s (may differ from route IF index)", idx, field)
-				return idx, nil
-			}
-		}
-	}
-	// Dump all NICs for diagnosis
-	out, _ := exec.Command("wmic", "nic", "get", "Index,Name,NetConnectionID").Output()
-	log.Printf("[WINTUN] Available NICs:\n%s", string(out))
-	return "", fmt.Errorf("tun interface %q not found via wmic", ifaceName)
+	return "", fmt.Errorf("route-compatible IPv4 interface index for %q is unavailable", ifaceName)
 }
 
-func allDigits(s string) bool {
-	if s == "" {
-		return false
+func validWindowsInterfaceIndex(s string) bool {
+	idx, err := strconv.ParseUint(s, 10, 32)
+	return err == nil && idx > 0
+}
+
+func windowsRouteTarget(network string) (string, string, error) {
+	ip, cidr, err := net.ParseCIDR(network)
+	if err != nil {
+		return "", "", fmt.Errorf("parse network CIDR %q: %w", network, err)
 	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
+	if ip.To4() == nil || len(cidr.Mask) != net.IPv4len {
+		return "", "", fmt.Errorf("route network %q must be IPv4", network)
 	}
-	return true
+	canonicalIP := cidr.IP.To4()
+	if canonicalIP == nil {
+		return "", "", fmt.Errorf("route network %q has no canonical IPv4 network", network)
+	}
+	mask := cidr.Mask
+	return canonicalIP.String(), fmt.Sprintf("%d.%d.%d.%d", mask[0], mask[1], mask[2], mask[3]), nil
+}
+
+func rememberWindowsRouteIndex(tunName, target, mask, idx string) {
+	windowsRouteIndexes.Lock()
+	defer windowsRouteIndexes.Unlock()
+	windowsRouteIndexes.byRoute[windowsRouteKey{tunName: tunName, target: target, mask: mask}] = idx
+}
+
+func rememberedWindowsRouteIndex(tunName, target, mask string) (string, bool) {
+	windowsRouteIndexes.Lock()
+	defer windowsRouteIndexes.Unlock()
+	idx, ok := windowsRouteIndexes.byRoute[windowsRouteKey{tunName: tunName, target: target, mask: mask}]
+	return idx, ok
+}
+
+func forgetWindowsRouteIndex(tunName, target, mask string) {
+	windowsRouteIndexes.Lock()
+	defer windowsRouteIndexes.Unlock()
+	delete(windowsRouteIndexes.byRoute, windowsRouteKey{tunName: tunName, target: target, mask: mask})
 }
 
 // AddRoute adds an on-link route (gateway 0.0.0.0) through the TUN interface.
 func AddRoute(network string, tunName, _ string) error {
-	_, cidr, err := net.ParseCIDR(network)
+	ip, mask, err := windowsRouteTarget(network)
 	if err != nil {
-		return fmt.Errorf("parse network CIDR %q: %w", network, err)
+		return err
 	}
-	ip := cidr.IP.String()
-	mask := fmt.Sprintf("%d.%d.%d.%d", cidr.Mask[0], cidr.Mask[1], cidr.Mask[2], cidr.Mask[3])
 
 	idx, err := getTunIndex(tunName)
 	if err != nil {
-		return fmt.Errorf("getTunIndex: %w", err)
+		return fmt.Errorf("route add target=%s mask=%s: authoritative IPv4 interface index for %q: %w", ip, mask, tunName, err)
 	}
 	cmd := exec.Command("route", "add", ip, "mask", mask, "0.0.0.0", "IF", idx)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("route add IF=%s: %s", idx, string(out))
+		return fmt.Errorf("route add target=%s mask=%s IF=%s: %s", ip, mask, idx, strings.TrimSpace(string(out)))
 	}
+	rememberWindowsRouteIndex(tunName, ip, mask, idx)
 	return nil
 }
 
 // DelRoute removes the tunnel route.
 func DelRoute(network string, tunName, _ string) {
-	_, cidr, err := net.ParseCIDR(network)
+	ip, mask, err := windowsRouteTarget(network)
 	if err != nil {
-		log.Printf("[DELROUTE] parse CIDR %q: %v", network, err)
+		log.Printf("[DELROUTE] invalid route network=%q: %v", network, err)
 		return
 	}
-	ip := cidr.IP.String()
-	mask := fmt.Sprintf("%d.%d.%d.%d", cidr.Mask[0], cidr.Mask[1], cidr.Mask[2], cidr.Mask[3])
 
-	idx, err := getTunIndex(tunName)
-	if err == nil {
-		exec.Command("route", "delete", ip, "mask", mask, "0.0.0.0", "IF", idx).Run()
-	} else {
-		exec.Command("route", "delete", ip, "mask", mask, "0.0.0.0").Run()
+	idx, ok := rememberedWindowsRouteIndex(tunName, ip, mask)
+	if !ok {
+		log.Printf("[DELROUTE] cleanup incomplete: delete skipped target=%s mask=%s alias=%q because retained route ownership index is missing", ip, mask, tunName)
+		return
 	}
+
+	out, err := exec.Command("route", "delete", ip, "mask", mask, "0.0.0.0", "IF", idx).CombinedOutput()
+	if err != nil {
+		log.Printf("[DELROUTE] delete failed target=%s mask=%s IF=%s: %v output=%q", ip, mask, idx, err, strings.TrimSpace(string(out)))
+		return
+	}
+	log.Printf("[DELROUTE] delete OK target=%s mask=%s IF=%s output=%q", ip, mask, idx, strings.TrimSpace(string(out)))
+	forgetWindowsRouteIndex(tunName, ip, mask)
 }
 
-// CloseTUN shuts down the TUN adapter.
+// CloseTUN releases the Wintun handle. It intentionally retains the named
+// adapter so a later CreateTUN can reuse it.
 func CloseTUN(iface TunDevice, _ string) {
 	if iface != nil {
 		iface.Close()
